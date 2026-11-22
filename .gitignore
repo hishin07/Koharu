@@ -69,3 +69,9 @@ test-results/
 
 # Sonde locale de decodage speculatif : entrees dans bench-profile/ et le store, non versionnees
 /crates/koharu-ml/examples/spec_decode_probe.rs
+
+# Tauri build artifacts
+llama-common.dll
+llama.dll
+mtmd.dll
+release.html
