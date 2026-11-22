@@ -1,20 +1,10 @@
-#[macro_use]
-pub mod utils;
-
-pub use utils::{
-    get_num_interop_threads, get_num_threads, manual_seed, set_num_interop_threads,
-    set_num_threads, QEngine,
-};
-
 pub(crate) mod device;
-pub(crate) mod image;
-pub mod jit;
+pub(crate) mod generator;
 pub mod kind;
 pub(crate) mod layout;
-pub(crate) mod optimizer;
 pub(crate) mod scalar;
-pub(crate) mod stream;
 pub(crate) mod tensor;
+<<<<<<< HEAD
 // The generated tensor wrappers stay byte-identical to the upstream tch-rs
 // codegen, whose `allow(clippy::all)` silences only clippy: its `std::f64::NAN`
 // defaults trip rustc's `deprecated` under CI's `-D warnings`. Exempting the
@@ -22,3 +12,21 @@ pub(crate) mod tensor;
 #[allow(deprecated)]
 pub(crate) mod tensor_fallible_generated;
 pub(crate) mod tensor_generated;
+=======
+pub(crate) mod utils;
+
+// A method or function for each operator, which build.rs generates from
+// koharu-torch-sys's bindings. A dunder operator, such as `__and__`, keeps
+// its doubled underscores.
+#[allow(clippy::all, non_snake_case)]
+mod tensor_generated {
+    use std::borrow::Borrow;
+
+    use koharu_torch_sys::*;
+
+    use super::utils::{IntList, IntListOption, check};
+    use crate::{Device, Generator, Kind, Layout, MemoryFormat, QScheme, Result, Scalar, Tensor};
+
+    include!(concat!(env!("OUT_DIR"), "/tensor_generated.rs"));
+}
+>>>>>>> upstream/main

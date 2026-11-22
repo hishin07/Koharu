@@ -41,10 +41,25 @@ Koharu introduit un workflow local-first pour la traduction de manga, en exploit
 - [Export PSD en calques](https://koharu.rs/en/guides/export) pour une livraison aplatie et une édition en calques
 - [Workflow basé sur des agents](https://koharu.rs/en/agent/projects) pour l'inspection et l'édition des projets, ainsi que le contrôle du pipeline
 
+<<<<<<< HEAD
 ## Ce que cette branche ajoute
+=======
+- [Multi-format project management](https://koharu.rs/guides/projects) for raster images, archives, and PDFs with page sequencing
+- [Selective pipeline](https://koharu.rs/guides/processing) for detection, OCR, translation, and inpainting at page or project scope
+- [Detection and segmentation](https://koharu.rs/guides/processing) for panels, speech bubbles, text, and sound effects
+- [OCR](https://koharu.rs/models/vision) for Japanese, Chinese, Korean, and English manga text
+- [Local GGUF inference and hosted providers](https://koharu.rs/models/providers) for LLM translation, including ChatGPT and Grok sign-in
+- [Generative inpainting](https://koharu.rs/guides/cleanup) for source-text removal and artwork reconstruction
+- [Proofreading](https://koharu.rs/guides/review) for correcting OCR and translation output
+- [GPU-based canvas](https://koharu.rs/guides/canvas) for manual cleanup, text placement, and page composition
+- [Multilingual text shaping and layout](https://koharu.rs/guides/typesetting) with automatic fitting, font fallback, vertical CJK, and right-to-left text
+- [PNG, CBZ, and layered PSD export](https://koharu.rs/guides/export) for flattened delivery and layered editing
+- [Agent-driven workflow](https://koharu.rs/agent/projects) with an [MCP server](https://koharu.rs/agent/setup) for AI agents
+>>>>>>> upstream/main
 
 Ce dépôt est un fork de [koharu-rs/koharu](https://github.com/koharu-rs/koharu) : l'application d'origine reste intacte et gagne l'outillage autour d'elle.
 
+<<<<<<< HEAD
 - **La CLI par lot `koharu-batch`** — traduit des chapitres entiers depuis le terminal : un dossier de scans ou une archive CBZ en entrée, des pages traduites en sortie (`--lang` pour la cible), ou un **volume entier** où chaque sous-dossier ou `.cbz` devient son propre chapitre. Exécution **phase-major** (les modèles se chargent une seule fois au lieu d'une fois par page), reprise page par page y compris depuis une archive CBZ de sortie existante, `--no-vision` pour les exécutions en texte seul, rapport HTML/Markdown de fin d'exécution avec aperçus avant/après, résumé `--json` lisible par les machines, et code de sortie 0 seulement si toutes les pages ont réussi (prêt pour la CI).
 - **Un choix automatique de modèle calibré** — priorité aux modèles qui tiennent entièrement dans le budget de VRAM (Qwen 3.5 4B sur 8 Go), plafonné à la classe 8 Go (un 12B ou plus ne s'obtient que par un `--llm` explicite), puis repli sur le meilleur split viable ; calibration mesurée (`~/.koharu/vram-calibration.toml` enregistre les pics réels) et avertissement avant un premier gros téléchargement. `koharu-batch models` liste le catalogue avec les estimations de VRAM.
 - **La fiche de chapitre apprise** — avant de traduire un chapitre, l'outil lit son texte OCR **une fois** et en tire une fiche (œuvre, synopsis, registre, personnages, glossaire) qu'il joint ensuite à la traduction de **chaque page**. Les noms et les termes cessent de dériver d'une page à l'autre : mesuré sur un chapitre réel de 34 pages, la tenue des noms/termes passe de **41,7 %** (contexte glissant) à **97,2 %** (fiche + glossaire) — élargir la fenêtre de contexte n'apporte rien, une fiche si. La fiche est un composant du projet : elle se relit et se corrige à la main, et se réutilise aux runs suivants. Le glossaire est restreint aux termes réellement présents, et le prompt interdit d'en introduire un absent du segment.
@@ -85,6 +100,9 @@ Voir [packages/docs/en/fork.mdx](packages/docs/en/fork.mdx) pour la documentatio
 ## Accélération matérielle
 
 Koharu prend en charge CUDA et ROCm / HIP sur Windows et Linux, Metal sur les puces Apple, et Vulkan sur Windows et Linux. Gardez votre pilote graphique à jour ; une installation complète du SDK CUDA ou ROCm n'est pas requise. Consultez [Exigences d'exécution et matérielles](https://koharu.rs/en/hardware) pour des recommandations propres à chaque modèle.
+=======
+Koharu supports CUDA on Windows and Linux, ROCm / HIP on x86-64 Windows and Linux, Metal on Apple silicon, and Vulkan on Windows and Linux out of the box. See [Runtime and hardware requirements](https://koharu.rs/hardware) for model-specific guidance.
+>>>>>>> upstream/main
 
 ### CUDA
 
@@ -92,7 +110,11 @@ CUDA 13.3 nécessite un GPU NVIDIA de classe Turing ou plus récent, ainsi qu'un
 
 ### ROCm / HIP
 
+<<<<<<< HEAD
 La prise en charge de ROCm 10.0 dépend de la combinaison exacte du GPU AMD, du système d'exploitation et du pilote. Consultez la [matrice de compatibilité ROCm 10.0.0](https://rocm.docs.amd.com/en/docs-10.0.0/compatibility/compatibility-matrix.html) officielle d'AMD et installez un [pilote AMD](https://www.amd.com/en/support) compatible.
+=======
+ROCm 10.1 support depends on the exact AMD GPU, operating system, and driver combination. Check AMD's official [ROCm 10.1.0 compatibility matrix](https://rocm.docs.amd.com/en/docs-10.1.0/compatibility/compatibility-matrix.html) and install a compatible [AMD driver](https://www.amd.com/en/support).
+>>>>>>> upstream/main
 
 ### Metal
 
@@ -100,6 +122,7 @@ Metal est disponible sur les Mac à puces Apple.
 
 ### Vulkan
 
+<<<<<<< HEAD
 Vulkan est disponible sur Windows et Linux en alternative à CUDA et ROCm / HIP.
 
 ### WebGPU
@@ -109,10 +132,17 @@ Le canvas de l'éditeur utilise WebGPU et nécessite un pilote graphique à jour
 ### CPU
 
 L'inférence sur CPU est disponible pour les charges de travail prises en charge, mais elle est nettement plus lente.
+=======
+Vulkan is available on Windows and Linux as an alternative to CUDA and ROCm / HIP. With Vulkan, some models still fall back to the CPU, which is slower.
+>>>>>>> upstream/main
 
 ## Modèles d'apprentissage automatique
 
+<<<<<<< HEAD
 Koharu utilise des modèles distincts pour la détection, l'OCR, l'inpainting et la traduction. [Vision et inpainting](https://koharu.rs/en/models/vision) et [traduction et génération](https://koharu.rs/en/models/translation) ont des paramètres de modèle séparés.
+=======
+Koharu uses separate models for detection, OCR, inpainting, and translation. [Vision and inpainting](https://koharu.rs/models/vision) and [translation](https://koharu.rs/models/translation) have separate model settings.
+>>>>>>> upstream/main
 
 ### Modèles de vision par ordinateur
 
@@ -120,40 +150,61 @@ Les modèles de détection, d'OCR et d'inpainting sont sélectionnés séparéme
 
 #### Détection et disposition
 
+<<<<<<< HEAD
 Le modèle de détection trouve les zones de texte, les bulles de dialogue et les masques de segmentation.
+=======
+The detection model finds panels, speech bubbles, text, and sound effects, with a mask over each text's glyphs.
+>>>>>>> upstream/main
 
-- [Koharu Layout RF-DETR Seg 2XL](https://huggingface.co/mayocream/koharu-layout-rfdetr-seg-2xl-1152)
+- [Koharu Layout HighRes](https://huggingface.co/mayocream/koharu-layout-highres)
 
 #### OCR
 
 L'OCR lit le texte source à partir des zones détectées.
 
-- [PaddleOCR VL 1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6)
-- [Manga OCR](https://huggingface.co/mayocream/manga-ocr)
+- [manga-ocr-ar-experimental](https://huggingface.co/muscgab/manga-ocr-ar-experimental) (CC BY-NC-SA 4.0)
 - [Baberu OCR](https://huggingface.co/genshiai-daichi/baberu-ocr)
-- [Hayai OCR](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2)
+- [Hayai OCR](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.7-supernova)
 
 #### Inpainting
 
 L'inpainting reconstruit l'image derrière le texte source avant que la traduction ne soit rendue.
 
+<<<<<<< HEAD
 - [FLUX.2 Klein](https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF)
 - [Qwen Image 2.1](https://huggingface.co/leejet/Qwen-Image-2.1-GGUF)
 - [Qwen Image 2.1 Uncensored](https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF)
 - [RORem mixed](https://huggingface.co/mayocream/RORem-mixed-GGUF)
+=======
+>>>>>>> upstream/main
 - [LaMa](https://huggingface.co/mayocream/lama-manga)
-- [AOT GAN](https://huggingface.co/mayocream/aot-inpainting)
+- [FLUX.3 Image Klein](https://huggingface.co/unsloth/flux-3-image-klein-GGUF)
+- [Qwen-Image 2.1](https://huggingface.co/leejet/Qwen-Image-2.1-GGUF) (Qwen Research License, research and evaluation only)
 
 ### Grands modèles de langage
 
 La traduction peut utiliser un modèle de langage local ou une API distante.
 
+<<<<<<< HEAD
 #### Modèles locaux généralistes
 
 - Gemma 4 (QAT) : [gemma4-e2b-it](https://huggingface.co/unsloth/gemma-4-E2B-it-qat-GGUF), [gemma4-12b-it](https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF), [gemma4-26b-a4b-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF), [gemma4-31b-it](https://huggingface.co/unsloth/gemma-4-31B-it-qat-GGUF)
 - Qwen 3.5 : [qwen3.5-2b](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF), [qwen3.5-4b](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF), [qwen3.5-9b](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF), [qwen3.5-27b](https://huggingface.co/unsloth/Qwen3.5-27B-GGUF), [qwen3.5-35b-a3b](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF)
 - Qwen 3.6 : [qwen3.6-27b](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF), [qwen3.6-35b-a3b](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF)
 - Qwen 3.8 : [qwen3.8-27b](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF)
+=======
+#### Translation Models
+
+- Index-Translate: [index-translate-2b](https://huggingface.co/IndexTeam/Index-Translate-2B-GGUF), [index-translate-9b](https://huggingface.co/IndexTeam/Index-Translate-9B-GGUF), [index-translate-35b-a3b-preview](https://huggingface.co/IndexTeam/Index-Translate-35B-A3B-preview-GGUF)
+
+#### General-Purpose Local Models
+
+- LFM3: [lfm3-1.7b](https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF)
+- Gemma 4: [gemma4-e2b-it](https://huggingface.co/unsloth/gemma-4-E2B-it-qat-GGUF), [gemma4-e4b-it](https://huggingface.co/unsloth/gemma-4-E4B-it-qat-GGUF), [gemma4-12b-it](https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF), [gemma4-26b-a4b-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF), [gemma4-31b-it](https://huggingface.co/unsloth/gemma-4-31B-it-qat-GGUF)
+- Qwen 3.5: [qwen3.5-0.8b](https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF), [qwen3.5-2b](https://huggingface.co/unsloth/Qwen3.5-2B-GGUF), [qwen3.5-4b](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF), [qwen3.5-9b](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF), [qwen3.5-27b](https://huggingface.co/unsloth/Qwen3.5-27B-GGUF), [qwen3.5-35b-a3b](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF)
+- Qwen 3.6: [qwen3.6-27b](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF), [qwen3.6-35b-a3b](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF)
+- Qwen 3.8: [qwen3.8-27b](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF)
+>>>>>>> upstream/main
 
 #### Modèles locaux non censurés
 
@@ -162,6 +213,7 @@ La traduction peut utiliser un modèle de langage local ou une API distante.
 - Qwen 3.6 non censuré : [qwen3.6-27b-uncensored](https://huggingface.co/HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Balanced), [qwen3.6-35b-a3b-uncensored](https://huggingface.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive)
 - Qwen 3.8 non censuré : [qwen3.8-27b-uncensored](https://huggingface.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF)
 
+<<<<<<< HEAD
 #### Moteur de traduction spécialisé (texte seul)
 
 - Hy-MT2 : famille de modèles de traduction de Tencent (Apache-2.0), texte seul — ni vision (pas de projector), ni mode reasoning — cibles limitées aux 38 langues de son entraînement (pas de pt-BR, de bulgare, de biélorusse ni de hongrois) :
@@ -180,13 +232,28 @@ Fournisseurs de traduction automatique : [DeepL](https://www.deepl.com/), [Googl
 #### Fournisseurs compatibles OpenAI
 
 Les points d'accès compatibles OpenAI sont également pris en charge.
+=======
+#### Cloud Providers (BYOK)
+
+Hosted LLM providers with an API key: [OpenAI](https://platform.openai.com/), [Anthropic](https://www.anthropic.com/api), [Google Gemini](https://ai.google.dev/), [xAI](https://docs.x.ai/developers), [DeepSeek](https://platform.deepseek.com/), [MiniMax](https://platform.minimax.io/), and [OpenRouter](https://openrouter.ai/).
+
+Subscriptions with sign-in: ChatGPT, and Grok with a SuperGrok or X Premium plan.
+
+#### Self-Hosted Providers
+
+Ollama and LM Studio, at their local addresses or a base URL you set, and one OpenAI-compatible endpoint at its base URL.
+>>>>>>> upstream/main
 
 ## Installation
 
 Téléchargez les builds depuis la [page des releases de ce dépôt](https://github.com/Endymi0n74/Koharu/releases/latest) :
 
+<<<<<<< HEAD
 - **Windows** — `koharu_*_x64-setup.exe` (installateur), plus `koharu-batch.exe` en binaire autonome ;
 - **Linux** — AppImage, paquets `.deb` et `.rpm` (amd64 et arm64).
+=======
+Builds are available for Windows (x64), macOS (Apple silicon), and Linux (x86-64 and ARM64).
+>>>>>>> upstream/main
 
 Chaque binaire est accompagné de sa signature `.sig` ; `latest.json` référence la version pour l'updater intégré. [Les prérequis d'installation et le premier lancement](https://koharu.rs/en/installation) varient selon le système d'exploitation.
 
@@ -195,7 +262,21 @@ Chaque binaire est accompagné de sa signature `.sig` ; `latest.json` référenc
 
 ## Dépannage
 
+<<<<<<< HEAD
 Les erreurs de démarrage, d'exécution, de modèle et de fournisseur sont traitées dans [Dépannage](https://koharu.rs/en/reference/troubleshooting). Définissez `RUST_LOG` sur `debug` ou `trace` pour des journaux verbeux :
+=======
+### Homebrew
+
+Install on macOS with [Homebrew](https://brew.sh/):
+
+```bash
+brew install --cask koharu
+```
+
+## Troubleshooting
+
+Startup, runtime, model, and provider errors are covered in [Troubleshooting](https://koharu.rs/reference/troubleshooting). Koharu writes a log file of its INFO messages and above; its location is listed in [Formats and data](https://koharu.rs/reference/data#logs). Set `RUST_LOG` to `debug` or `trace` for verbose logs in a terminal:
+>>>>>>> upstream/main
 
 ```bash
 # macOS / Linux

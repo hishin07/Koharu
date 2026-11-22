@@ -1,24 +1,22 @@
-//! Typed, evolvable Koharu project semantics over [`koharu_storage`].
-//!
-//! The storage crate remains ignorant of pages, hierarchy, relations, text,
-//! assets, and model provenance. This crate supplies those meanings through
-//! independently versioned components and validates them at every project
-//! snapshot boundary.
+//! Koharu's scene graph: Photoshop's layers, a page background, and the parts
+//! of a manga page as typed kinds. The README is the design.
 
 mod change;
-mod component;
-mod components;
-mod document;
+mod color;
 mod edit;
 mod error;
-mod id;
-mod patch;
-mod schema;
-mod semantics;
+mod ids;
+mod kinds;
+mod layer;
+mod project;
+mod query;
 mod session;
-mod snapshot;
-mod state;
+mod store;
+mod text;
+mod tiles;
+mod values;
 
+<<<<<<< HEAD
 pub use change::{
     Change, ComponentChange, ComponentOwner, EntityChange, RelationChange, ValueChangeKind,
 };
@@ -33,17 +31,19 @@ pub use components::{
 };
 pub use document::{AnalysisRegionRef, GroupRef, TextContentRef, TextLayerRef};
 pub use edit::{At, Edit, RemovePolicy};
+=======
+pub use change::{Change, Created, History, PageChanges};
+pub use color::{Color, Rgba};
+pub use edit::{Edit, Op};
+>>>>>>> upstream/main
 pub use error::{Error, Result};
-pub use id::{EntityId, ProducerId, ProjectId, RelationId};
-pub use patch::Patch;
-pub use semantics::{
-    BubbleRegion, FitsTo, FlowsIn, FunctionalRelation, Inside, PanelRegion, Presents,
-    RecognizedFrom, RegionSpec, RelationSpec, TextRegion,
-};
-pub use session::{Commit, Session};
-pub use snapshot::{EntityRef, PageRef, RelationRef, Snapshot};
-
-pub use koharu_storage::{BlobId, PatchId, Revision};
-
-#[cfg(test)]
-mod tests;
+pub use icu_locale_core::LanguageIdentifier;
+pub use ids::{Hash, LayerId, PageId, ProjectId, Ref, Revision, Uuid};
+pub use kinds::*;
+pub use layer::{Attributes, Layer, NewLayer, PixelFormat};
+pub use project::{Background, Page, Project};
+pub use query::{Answer, PageSummary, ProjectAnswer, Query};
+pub use session::{EXTENSION, Session};
+pub use text::{CharStyle, RichText, Span, Text, TextStyle};
+pub use tiles::{Tile, Tiles};
+pub use values::*;

@@ -1,47 +1,12 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import {
-  act,
-  fireEvent,
-  render as testingRender,
-  renderHook,
-  screen,
-  waitFor,
-} from '@testing-library/react'
+import { fireEvent, render as testingRender, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { ThemeProvider } from 'next-themes'
 import { StrictMode, type ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { TitleBar } from '@/components/app/TitleBar'
 import { WindowControls } from '@/components/app/WindowChrome'
-import { ActivityCenter } from '@/components/editor/ActivityCenter'
-import { CanvasCommandBar } from '@/components/editor/CanvasCommandBar'
-import { Inspector } from '@/components/editor/Inspector'
-import { PageRail } from '@/components/editor/PageRail'
-import { ResourceMonitor } from '@/components/editor/ResourceMonitor'
-import { StatusBar } from '@/components/editor/StatusBar'
-import { ToolBar } from '@/components/editor/ToolBar'
-import { ProviderPreferences } from '@/components/preferences/ProviderPreferences'
-import { SettingsPage } from '@/components/preferences/SettingsPage'
-import {
-  fontsKey,
-  pageKey,
-  pagesKey,
-  preparedPageKey,
-  projectKey,
-  queryClient,
-  useCommand,
-} from '@/lib/queries'
-import { useKoharuStore } from '@/lib/store'
-import * as canvasRuntime from '@koharu/bridge/canvas'
-import {
-  commands,
-  type Layer,
-  type PageSummary,
-  type Preferences,
-  type ProjectInfo,
-} from '@koharu/bridge/protocol'
-import { TooltipProvider } from '@koharu/ui/components/tooltip'
+import { queryClient } from '@/lib/queries'
 
 const nativeWindow = vi.hoisted(() => ({
   close: vi.fn(async () => undefined),
@@ -58,6 +23,7 @@ vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => nativeWindow 
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: nativeGetVersion }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: nativeOpenUrl }))
 
+<<<<<<< HEAD
 const emptyCredential = () => ({ configured: false, value: null, clear: false })
 
 const textLayer: Layer = {
@@ -240,16 +206,13 @@ function installProject() {
   ])
 }
 
+=======
+>>>>>>> upstream/main
 function render(ui: ReactNode) {
   return testingRender(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
 }
 
-function SettingsNavigationHarness() {
-  const settingsOpen = useKoharuStore((state) => state.settingsOpen)
-  return settingsOpen ? <SettingsPage /> : <CanvasCommandBar />
-}
-
-describe('greenfield editor', () => {
+describe('window chrome', () => {
   it('registers one native resize listener in React strict mode', async () => {
     const unlisten = vi.fn()
     nativeWindow.onResized.mockClear()
@@ -301,126 +264,6 @@ describe('greenfield editor', () => {
     )
   })
 
-  it('shows import activity and prevents duplicate imports', async () => {
-    const user = userEvent.setup()
-    installProject()
-    let finishImport: (() => void) | undefined
-    const importPages = vi.spyOn(commands, 'import').mockImplementation(
-      () =>
-        new Promise<null>((resolve) => {
-          finishImport = () => resolve(null)
-        }),
-    )
-    render(
-      <>
-        <TitleBar />
-        <PageRail />
-        <ActivityCenter />
-      </>,
-    )
-
-    expect(screen.getByText('/')).toHaveClass('mx-2')
-    expect(screen.queryByRole('button', { name: 'Import pages' })).not.toBeInTheDocument()
-    await user.click(screen.getByRole('menuitem', { name: 'File' }))
-    await user.hover(await screen.findByRole('menuitem', { name: 'Import Pages' }))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Files…' }))
-
-    expect(await screen.findByRole('status')).toHaveTextContent('Importing pages…')
-    expect(screen.getByRole('complementary', { name: 'Activity' })).toBeInTheDocument()
-    expect(importPages).toHaveBeenCalledTimes(1)
-
-    await user.click(screen.getByRole('menuitem', { name: 'File' }))
-    expect(await screen.findByRole('menuitem', { name: 'Importing pages…' })).toHaveAttribute(
-      'aria-disabled',
-      'true',
-    )
-
-    finishImport?.()
-    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument())
-  })
-
-  it.each(['png', 'psd', 'cbz'] as const)(
-    'shows %s export activity and prevents duplicate exports',
-    async (format) => {
-      const user = userEvent.setup()
-      installProject()
-      let finishExport: (() => void) | undefined
-      const exportProject = vi.spyOn(commands, 'export').mockImplementation(
-        () =>
-          new Promise<null>((resolve) => {
-            finishExport = () => resolve(null)
-          }),
-      )
-      render(
-        <>
-          <TitleBar />
-          <ActivityCenter />
-        </>,
-      )
-
-      expect(screen.queryByRole('complementary', { name: 'Activity' })).not.toBeInTheDocument()
-      await user.click(screen.getByRole('menuitem', { name: 'File' }))
-      await user.hover(await screen.findByRole('menuitem', { name: 'Export Project' }))
-      fireEvent.click(await screen.findByRole('menuitem', { name: `${format.toUpperCase()}…` }))
-
-      expect(await screen.findByRole('status')).toHaveTextContent('Export Project')
-      expect(exportProject).toHaveBeenCalledExactlyOnceWith(format)
-      await user.click(screen.getByRole('menuitem', { name: 'File' }))
-      expect(await screen.findByRole('menuitem', { name: 'Export Project' })).toHaveAttribute(
-        'aria-disabled',
-        'true',
-      )
-
-      await act(async () => finishExport?.())
-      await waitFor(() =>
-        expect(screen.queryByRole('complementary', { name: 'Activity' })).not.toBeInTheDocument(),
-      )
-      expect(await screen.findByRole('menuitem', { name: 'Export Project' })).not.toHaveAttribute(
-        'aria-disabled',
-        'true',
-      )
-    },
-  )
-
-  it.each([
-    { command: 'import', menu: 'Import Pages', choice: 'Files…', pending: 'Importing pages…' },
-    { command: 'export', menu: 'Export Project', choice: 'CBZ…', pending: 'Export Project' },
-  ] as const)(
-    'clears $command activity after failure',
-    async ({ command, menu, choice, pending }) => {
-      const user = userEvent.setup()
-      installProject()
-      let fail: ((error: Error) => void) | undefined
-      vi.spyOn(commands, command).mockImplementation(
-        () =>
-          new Promise<null>((_resolve, reject) => {
-            fail = reject
-          }),
-      )
-      render(
-        <>
-          <TitleBar />
-          <ActivityCenter />
-        </>,
-      )
-
-      await user.click(screen.getByRole('menuitem', { name: 'File' }))
-      await user.hover(await screen.findByRole('menuitem', { name: menu }))
-      fireEvent.click(await screen.findByRole('menuitem', { name: choice }))
-      expect(await screen.findByRole('status')).toHaveTextContent(pending)
-
-      await user.click(screen.getByRole('menuitem', { name: 'File' }))
-      await act(async () => fail?.(new Error('File operation failed')))
-      await waitFor(() =>
-        expect(screen.queryByRole('complementary', { name: 'Activity' })).not.toBeInTheDocument(),
-      )
-      expect(await screen.findByRole('menuitem', { name: menu })).not.toHaveAttribute(
-        'aria-disabled',
-        'true',
-      )
-    },
-  )
-
   it('opens community links through the Tauri opener plugin', async () => {
     nativeOpenUrl.mockClear()
     const user = userEvent.setup()
@@ -447,6 +290,7 @@ describe('greenfield editor', () => {
     expect(screen.getByText('Mayo Takanashi')).toBeInTheDocument()
     expect(nativeGetVersion).toHaveBeenCalledTimes(1)
   })
+<<<<<<< HEAD
 
   it('shows how many pages are selected above the filter', async () => {
     installProject()
@@ -1908,4 +1752,6 @@ describe('greenfield editor', () => {
     expect(screen.getByText(/llama\.cpp logs:/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Show less' })).toBeInTheDocument()
   })
+=======
+>>>>>>> upstream/main
 })

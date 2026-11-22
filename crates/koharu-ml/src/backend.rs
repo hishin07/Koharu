@@ -1,11 +1,10 @@
-use anyhow::{Result, bail};
-use koharu_runtime::{Backend, Device, Hardware};
-use koharu_torch::{Cuda, Kind, nn};
+//! The runtime's device as libtorch sees it, and the precision models run
+//! in there.
 
-pub(crate) trait TryIntoDevice<T> {
-    fn try_into_device(self) -> Result<T>;
-}
+use koharu_runtime::{Backend, Device};
+use koharu_torch::Kind;
 
+<<<<<<< HEAD
 impl TryIntoDevice<koharu_torch::Device> for Device {
     fn try_into_device(self) -> Result<koharu_torch::Device> {
         match &self.backend {
@@ -70,13 +69,34 @@ pub(crate) fn set_precision(var_store: &mut nn::VarStore) {
 
     if var_store.is_empty() {
         var_store.set_kind(if use_bfloat16 {
+=======
+/// `device` as a libtorch device, and the precision its models run in: BF16
+/// where the device computes in it, F32 elsewhere.
+pub(crate) fn torch(device: &Device) -> (koharu_torch::Device, Kind) {
+    let precision = |bfloat16| {
+        if bfloat16 {
+>>>>>>> upstream/main
             Kind::BFloat16
         } else {
             Kind::Float
-        });
-    } else if use_bfloat16 {
-        var_store.bfloat16();
-    } else {
-        var_store.float();
+        }
+    };
+    match device.backend {
+        // libtorch has no Vulkan build, so the runtime installs its CPU one.
+        Backend::Cpu | Backend::Vulkan => (koharu_torch::Device::Cpu, Kind::Float),
+        // libtorch addresses HIP devices as CUDA ones.
+        Backend::Cuda { compute_capability } => (
+            koharu_torch::Device::Cuda(device.index),
+            precision(compute_capability >= 80),
+        ),
+        Backend::Rocm { target } => (
+            koharu_torch::Device::Cuda(device.index),
+            precision(
+                matches!(target, "gfx908" | "gfx90a" | "gfx942" | "gfx950")
+                    || target.starts_with("gfx11")
+                    || target.starts_with("gfx12"),
+            ),
+        ),
+        Backend::Metal => (koharu_torch::Device::Mps, Kind::Float),
     }
 }

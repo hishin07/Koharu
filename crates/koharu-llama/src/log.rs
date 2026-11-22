@@ -1,6 +1,9 @@
 use super::LogOptions;
+<<<<<<< HEAD
 use std::collections::VecDeque;
 use std::sync::OnceLock;
+=======
+>>>>>>> upstream/main
 use tracing_core::{Interest, Kind, Metadata, callsite, field, identify_callsite};
 
 static FIELD_NAMES: &[&str] = &["message", "module"];
@@ -21,7 +24,7 @@ macro_rules! log_cs {
         static $cs: $ty = $ty;
         static $meta: Metadata<'static> = Metadata::new(
             "log event",
-            "koharu-llama",
+            "llama-cpp-2",
             $level,
             ::core::option::Option::None,
             ::core::option::Option::None,
@@ -78,6 +81,9 @@ log_cs!(
 pub(super) enum Module {
     Ggml,
     LlamaCpp,
+    /// Multimodal
+    #[cfg(feature = "mtmd")]
+    Mtmd,
 }
 
 impl Module {
@@ -85,6 +91,8 @@ impl Module {
         match self {
             Module::Ggml => "ggml",
             Module::LlamaCpp => "llama.cpp",
+            #[cfg(feature = "mtmd")]
+            Module::Mtmd => "mtmd",
         }
     }
 }
@@ -107,7 +115,8 @@ pub(super) struct State {
     pub(super) options: LogOptions,
     module: Module,
     buffered: std::sync::Mutex<Option<(koharu_llama_sys::ggml_log_level, String)>>,
-    previous_level: std::sync::atomic::AtomicI64,
+    // A C `int`: bindgen types the `ggml_log_level` enum as `c_int` under MSVC and `c_uint` elsewhere.
+    previous_level: std::sync::atomic::AtomicI32,
     is_buffering: std::sync::atomic::AtomicBool,
     recent: std::sync::Mutex<VecDeque<String>>,
 }
@@ -209,8 +218,7 @@ impl State {
             let level = self
                 .previous_level
                 .load(std::sync::atomic::Ordering::Acquire)
-                .try_into()
-                .expect("stored log level no longer fits the native enum type");
+                as koharu_llama_sys::ggml_log_level;
             tracing::warn!(
                 inferred_level = level,
                 text = text,
@@ -243,8 +251,10 @@ impl State {
 
         self.is_buffering
             .store(true, std::sync::atomic::Ordering::Release);
-        self.previous_level
-            .store(i64::from(level), std::sync::atomic::Ordering::Release);
+        self.previous_level.store(
+            level as std::ffi::c_int,
+            std::sync::atomic::Ordering::Release,
+        );
     }
 
     // Emit a normal unbuffered log message (not the CONT log level and the text ends with a newline).
@@ -267,8 +277,10 @@ impl State {
             Self::generate_log(self.module, buf_level, buf_text.as_str());
         }
 
-        self.previous_level
-            .store(i64::from(level), std::sync::atomic::Ordering::Release);
+        self.previous_level.store(
+            level as std::ffi::c_int,
+            std::sync::atomic::Ordering::Release,
+        );
 
         let (text, newline) = text.split_at(text.len() - 1);
         debug_assert_eq!(newline, "\n");
@@ -302,8 +314,10 @@ impl State {
         level: koharu_llama_sys::ggml_log_level,
     ) {
         if level != koharu_llama_sys::GGML_LOG_LEVEL_CONT {
-            self.previous_level
-                .store(i64::from(level), std::sync::atomic::Ordering::Release);
+            self.previous_level.store(
+                level as std::ffi::c_int,
+                std::sync::atomic::Ordering::Release,
+            );
         }
     }
 
@@ -313,8 +327,7 @@ impl State {
         let level = if level == koharu_llama_sys::GGML_LOG_LEVEL_CONT {
             self.previous_level
                 .load(std::sync::atomic::Ordering::Relaxed)
-                .try_into()
-                .expect("stored log level no longer fits the native enum type")
+                as koharu_llama_sys::ggml_log_level
         } else {
             level
         };
@@ -322,9 +335,6 @@ impl State {
         tracing::dispatcher::get_default(|dispatcher| dispatcher.enabled(meta))
     }
 }
-
-pub(super) static LLAMA_STATE: OnceLock<Box<State>> = OnceLock::new();
-pub(super) static GGML_STATE: OnceLock<Box<State>> = OnceLock::new();
 
 #[cfg(test)]
 mod tests {

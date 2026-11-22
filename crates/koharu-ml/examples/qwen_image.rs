@@ -1,0 +1,147 @@
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use clap::Parser;
+<<<<<<< HEAD:crates/koharu-ml/src/bin/qwen_image.rs
+use koharu_ml::qwen_image::{
+    QwenImage, QwenImageInpaint, QwenImageInpaintOptions, QwenImageOptions,
+};
+
+#[derive(Debug, Parser)]
+struct Cli {
+    #[arg(short, long, value_name = "FILE")]
+    input: Option<PathBuf>,
+
+    #[arg(short, long, value_name = "FILE", requires = "input")]
+    mask: Option<PathBuf>,
+=======
+use koharu_ml::qwen_image::{Options, QwenImage};
+
+#[derive(Debug, Parser)]
+struct Cli {
+    /// A condition image, read in the order given; repeat for several.
+    #[arg(short, long, value_name = "FILE")]
+    image: Vec<PathBuf>,
+>>>>>>> upstream/main:crates/koharu-ml/examples/qwen_image.rs
+
+    #[arg(short, long, value_name = "FILE")]
+    output: PathBuf,
+
+    #[arg(short, long, value_name = "TEXT")]
+    prompt: String,
+
+<<<<<<< HEAD:crates/koharu-ml/src/bin/qwen_image.rs
+    #[arg(long, value_name = "FILE")]
+    reference: Option<PathBuf>,
+
+    #[arg(long, value_name = "PX")]
+    width: Option<u32>,
+
+    #[arg(long, value_name = "PX")]
+    height: Option<u32>,
+
+    #[arg(long, default_value_t = 20)]
+    steps: usize,
+
+    #[arg(long, default_value_t = 0.8)]
+    strength: f64,
+
+    #[arg(long, default_value_t = -1)]
+    seed: i64,
+
+    #[arg(long)]
+    padding_mask_crop: Option<u32>,
+
+    #[arg(long, default_value_t = false)]
+    cpu: bool,
+=======
+    #[arg(long, value_name = "TEXT")]
+    negative_prompt: Option<String>,
+
+    #[arg(long, default_value_t = 1.0)]
+    true_cfg_scale: f32,
+
+    #[arg(long)]
+    width: Option<u32>,
+
+    #[arg(long)]
+    height: Option<u32>,
+
+    #[arg(long, default_value_t = -1)]
+    seed: i64,
+>>>>>>> upstream/main:crates/koharu-ml/examples/qwen_image.rs
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+<<<<<<< HEAD:crates/koharu-ml/src/bin/qwen_image.rs
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing::Level::INFO.into())
+        .from_env_lossy();
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+    let cli = Cli::parse();
+    let input = cli.input.as_ref().map(image::open).transpose()?;
+    let mask = cli.mask.as_ref().map(image::open).transpose()?;
+    let reference = cli.reference.as_ref().map(image::open).transpose()?;
+
+    koharu_ml::init().await?;
+
+    let output = if let Some(mask) = mask.as_ref() {
+        let input = input
+            .as_ref()
+            .context("--input is required when --mask is provided")?;
+        let pipeline = QwenImageInpaint::load(koharu_ml::device(cli.cpu)).await?;
+        let options = QwenImageInpaintOptions {
+            num_inference_steps: cli.steps,
+            strength: cli.strength,
+            seed: cli.seed,
+            padding_mask_crop: cli.padding_mask_crop,
+        };
+        pipeline.inference(&cli.prompt, input, reference.as_ref(), mask, &options)?
+    } else {
+        let pipeline = QwenImage::load(koharu_ml::device(cli.cpu)).await?;
+        let options = QwenImageOptions {
+            width: cli.width,
+            height: cli.height,
+            num_inference_steps: i32::try_from(cli.steps)?,
+            seed: cli.seed,
+            ..QwenImageOptions::default()
+        };
+        let references = input.into_iter().chain(reference).collect::<Vec<_>>();
+        let generated = pipeline
+            .inference(&references, &cli.prompt, &options)?
+            .into_iter()
+            .next()
+            .context("Qwen Image 2.1 returned no image")?;
+        image::DynamicImage::ImageRgba8(generated)
+    };
+    output.save(cli.output)?;
+=======
+    tracing_subscriber::fmt::init();
+    let cli = Cli::parse();
+    let images = cli
+        .image
+        .iter()
+        .map(image::open)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let device = koharu_runtime::device().await?;
+    let pipeline = QwenImage::load(device).await?;
+    let options = Options {
+        negative_prompt: cli.negative_prompt,
+        true_cfg_scale: cli.true_cfg_scale,
+        width: cli.width,
+        height: cli.height,
+        seed: cli.seed,
+        ..Options::default()
+    };
+    pipeline
+        .generate(&cli.prompt, &images, &options)?
+        .into_iter()
+        .next()
+        .context("Qwen-Image 2.1 Turbo returned no image")?
+        .save(cli.output)?;
+>>>>>>> upstream/main:crates/koharu-ml/examples/qwen_image.rs
+
+    Ok(())
+}
