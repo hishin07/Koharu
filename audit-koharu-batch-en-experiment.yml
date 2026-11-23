@@ -1,0 +1,93 @@
+name: Koharu Batch v0.89.0 - EN source experiment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows experimental build - source pinned
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout exact audited source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: Endymi0n74/Koharu
+          ref: 30db248cb365e630a94f44bf7e02e87bd5dc8c6b
+          persist-credentials: false
+
+      - name: Verify pinned source commit
+        shell: pwsh
+        run: |
+          $expected = '30db248cb365e630a94f44bf7e02e87bd5dc8c6b'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) {
+            throw "Unexpected source commit: $actual"
+          }
+          Write-Host "Verified source commit: $actual"
+
+      - name: Apply strictly limited EN source fallback experiment
+        shell: pwsh
+        run: |
+          $path = 'crates/koharu-pipeline/src/stages/ocr.rs'
+          $before = '.or_else(|| LanguageTag::new("ja-JP").ok());'
+          $after  = '.or_else(|| LanguageTag::new("en-US").ok());'
+          $text = [System.IO.File]::ReadAllText($path)
+          $matches = [regex]::Matches($text, [regex]::Escape($before))
+          if ($matches.Count -ne 1) {
+            throw "Expected exactly one fallback occurrence; found $($matches.Count)"
+          }
+          $patched = $text.Replace($before, $after)
+          [System.IO.File]::WriteAllText(
+            $path,
+            $patched,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'git diff --check failed' }
+
+          $changed = @((git diff --name-only) | Where-Object { $_ -ne '' })
+          if ($changed.Count -ne 1 -or $changed[0] -ne $path) {
+            throw "Unexpected changed files: $($changed -join ', ')"
+          }
+
+          $numstat = (git diff --numstat -- $path).Trim()
+          if ($numstat -ne "1`t1`t$path") {
+            throw "Change is not exactly 1 deleted line / 1 added line: $numstat"
+          }
+
+          Write-Host 'Verified: only one line changed in ocr.rs'
+          git diff -- $path
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to display source diff' }
+
+      - name: Compile Koharu Batch experiment
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cargo build --release --locked -p koharu-pipeline --bin koharu-batch
+
+      - name: Compute executable SHA256
+        shell: pwsh
+        run: |
+          $exe = 'target/release/koharu-batch.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            throw 'Executable missing'
+          }
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          Write-Host "EXPERIMENTAL_EXECUTABLE_SHA256=$hash"
+          "$hash  koharu-batch.exe" | Set-Content -Path 'target/release/koharu-batch-experiment-sha256.txt' -Encoding ascii
+
+      - name: Upload separate experimental executable
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: koharu-batch-v0.89.0-en-source-experiment
+          path: |
+            target/release/koharu-batch.exe
+            target/release/koharu-batch-experiment-sha256.txt
+          if-no-files-found: error
+          retention-days: 7
