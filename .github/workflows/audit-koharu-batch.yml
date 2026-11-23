@@ -1,0 +1,49 @@
+
+name: Audit Koharu Batch v0.89.0
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows - source pinned
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: Endymi0n74/Koharu
+          ref: 30db248cb365e630a94f44bf7e02e87bd5dc8c6b
+          persist-credentials: false
+
+      - name: Verify source commit
+        shell: pwsh
+        run: |
+          $sha = (git rev-parse HEAD).Trim()
+          if ($sha -ne "30db248cb365e630a94f44bf7e02e87bd5dc8c6b") {
+            throw "Unexpected source commit: $sha"
+          }
+
+      - name: Compile Koharu Batch
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cargo build --release --locked -p koharu-pipeline --bin koharu-batch
+
+      - name: Calculate executable SHA256
+        shell: pwsh
+        run: |
+          Get-FileHash "target/release/koharu-batch.exe" -Algorithm SHA256 | Format-List
+
+      - name: Upload executable for security audit
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: koharu-batch-v0.89.0-audit
+          path: target/release/koharu-batch.exe
+          if-no-files-found: error
+          retention-days: 7
