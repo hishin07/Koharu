@@ -1,0 +1,641 @@
+name: Koharu v0.89.0 - Hayai OCR Diagnostic Experiment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Pinned Windows experimental build - no manga data
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout exactly the audited public source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: Endymi0n74/Koharu
+          ref: 30db248cb365e630a94f44bf7e02e87bd5dc8c6b
+          persist-credentials: false
+
+      - name: Verify exact commit
+        shell: pwsh
+        run: |
+          $expected = '30db248cb365e630a94f44bf7e02e87bd5dc8c6b'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) {
+            throw "Unexpected source commit: $actual"
+          }
+          Write-Host "Audited commit confirmed: $actual"
+
+      - name: Apply pinned detector, OCR and translation diagnostics
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $patch = @'
+          #!/usr/bin/env python3
+          """Diagnostic instrumentation for exact pinned Koharu v0.89.0 source.
+          Only modifies detection.rs, ocr.rs, translation.rs and batch/cli.rs in the temporary CI checkout.
+          User manga content is NEVER uploaded to CI; output exports occur locally only
+          when KOHARU_DIAG_DIR is set when running the diagnostic executable.
+          """
+          from pathlib import Path
+          import hashlib
+          
+          root = Path.cwd()
+          detection_path = root / 'crates/koharu-pipeline/src/stages/detection.rs'
+          ocr_path = root / 'crates/koharu-pipeline/src/stages/ocr.rs'
+          translation_path = root / 'crates/koharu-pipeline/src/stages/translation.rs'
+          cli_path = root / 'crates/koharu-pipeline/src/batch/cli.rs'
+          expected = {
+              cli_path: '52CF645B510286CE691C869F53151EDA959F07FE0D172E9060F9C594BE24FA1C',
+              translation_path: '20FE634959BBA51E9356540530BC34C4DD2E9A289188A7679B3CC753846CF469',
+              detection_path: 'FD2AF1D05CD4BDBA56D4910630CC2F2C5381173A99E658C64FBC0615A5229EB5',
+              ocr_path: 'DBC5B030B8AF7F36A889E41708F3DECAC45EAEE9F7136C95058E6EE63B44ACEF',
+          }
+          for path, sha in expected.items():
+              actual = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest().upper()
+              if actual != sha:
+                  raise SystemExit(f'FATAL: unexpected source content at {path.name}: {actual}')
+          
+          def replace_once(text, before, after, label):
+              n = text.count(before)
+              if n != 1:
+                  raise SystemExit(f'FATAL: {label}: expected exactly 1 anchor, found {n}')
+              return text.replace(before, after, 1)
+          
+          # The exporter is inert in normal use; the environment variable is an opt-in.
+          exporter = r'''/// EXPERIMENT ONLY. Export original detector regions before and after NMS.
+          /// No source pages are exported here; local OCR crops and masks use the
+          /// separate opt-in KOHARU_DIAG_DIR environment variable.
+          fn export_detection_snapshot(
+              page: EntityId,
+              phase: &str,
+              detections: &[KoharuLayoutDetection],
+              width: u32,
+              height: u32,
+          ) -> Result<()> {
+              let Some(folder) = std::env::var_os("KOHARU_DIAG_DIR") else {
+                  return Ok(());
+              };
+              let folder = std::path::PathBuf::from(folder);
+              std::fs::create_dir_all(&folder)?;
+              if matches!(phase, "raw" | "reference" | "exploratory") {
+                  for (index, detection) in detections.iter().enumerate() {
+                      if detection.label != "text" {
+                          continue;
+                      }
+                      let mask = image::GrayImage::from_raw(
+                          detection.mask.width,
+                          detection.mask.height,
+                          detection.mask.pixels.clone(),
+                      ).context("invalid detector mask dimensions")?;
+                      mask.save(folder.join(format!("{page}_{phase}_text_{index}.png")))?;
+                  }
+              }
+              let entries = detections
+                  .iter()
+                  .enumerate()
+                  .map(|(index, detection)| {
+                      serde_json::json!({
+                          "index": index,
+                          "label": detection.label.as_str(),
+                          "label_id": detection.label_id,
+                          "score": detection.score,
+                          "bbox_xyxy": detection.bbox,
+                          "area": detection.area,
+                          "mask_width": detection.mask.width,
+                          "mask_height": detection.mask.height,
+                          "mask_nonzero_pixels": detection.mask.pixels.iter().filter(|v| **v != 0).count(),
+                          "mask_blake3": blake3::hash(&detection.mask.pixels).to_hex().to_string(),
+                      })
+                  })
+                  .collect::<Vec<_>>();
+              let record = serde_json::json!({
+                  "kind": "koharu-detection-diagnostic-v1",
+                  "phase": phase,
+                  "page": page.to_string(),
+                  "image_width": width,
+                  "image_height": height,
+                  "detections": entries,
+              });
+              std::fs::write(
+                  folder.join(format!("{page}_{phase}.json")),
+                  serde_json::to_vec_pretty(&record)?,
+              )?;
+              Ok(())
+          }
+          
+          '''
+          
+          d = detection_path.read_text(encoding='utf-8')
+          d = replace_once(d,
+              '        log_detector_output_hash(page, &output);\n        build_patch(&input, &image, output, &generation(PRODUCER, MODEL_ID)?).await',
+              '        log_detector_output_hash(page, &output);\n        export_detection_snapshot(page, "raw", &output.detections, output.image_width, output.image_height)?;\n        build_patch(&input, &image, output, &generation(PRODUCER, MODEL_ID)?).await',
+              'raw detector export')
+          d = replace_once(d,
+              '/// When `KOHARU_PATCH_HASH` is set, logs a content digest',
+              exporter + '/// When `KOHARU_PATCH_HASH` is set, logs a content digest',
+              'exporter function')
+          d = replace_once(d,
+              '    non_maximum_suppression(&mut detections, 0.5);\n    sort_by_layout(&mut detections);\n\n    let image = image.to_rgb8();',
+              '    non_maximum_suppression(&mut detections, 0.5);\n    sort_by_layout(&mut detections);\n    export_detection_snapshot(page, "kept", &detections, size.width, size.height)?;\n\n    let image = image.to_rgb8();',
+              'post-NMS export')
+          d = replace_once(d,
+              '        preserve_mask_outside_region(input, page, spec.role, bounds, &mut mask).await?;\n    }\n\n    let mut bytes = Cursor::new(Vec::new());',
+              '        preserve_mask_outside_region(input, page, spec.role, bounds, &mut mask).await?;\n    }\n\n    if let Some(folder) = std::env::var_os("KOHARU_DIAG_DIR") {\n        let folder = std::path::PathBuf::from(folder);\n        std::fs::create_dir_all(&folder)?;\n        mask.save(folder.join(format!("{page}_{}.png", spec.role)))?;\n    }\n\n    let mut bytes = Cursor::new(Vec::new());',
+              'mask PNG export')
+          
+          o = ocr_path.read_text(encoding='utf-8')
+          o = replace_once(o,
+              '            let crop = crop(&source, &geometry)\n                .with_context(|| format!("text region {region} is outside its source image"))?;\n            if std::env::var_os("KOHARU_OCRTRACE").is_some() {',
+              '            let crop = crop(&source, &geometry)\n                .with_context(|| format!("text region {region} is outside its source image"))?;\n            if let Some(folder) = std::env::var_os("KOHARU_DIAG_DIR") {\n                let folder = std::path::PathBuf::from(folder);\n                std::fs::create_dir_all(&folder)?;\n                crop.save(folder.join(format!("{page}_ocr_{region}.png")))?;\n            }\n            if std::env::var_os("KOHARU_OCRTRACE").is_some() {',
+              'OCR crops')
+          
+          d = replace_once(d,
+              '        thresholds.panel = config.panel_threshold.unwrap_or(thresholds.panel);\n        Ok(Self {',
+              r'''        thresholds.panel = config.panel_threshold.unwrap_or(thresholds.panel);
+                  let original_text_threshold = thresholds.text;
+                  if let Some(raw) = std::env::var_os("KOHARU_DIAG_TEXT_THRESHOLD") {
+                      anyhow::ensure!(std::env::var_os("KOHARU_DIAG_DIR").is_some(), "KOHARU_DIAG_TEXT_THRESHOLD requires KOHARU_DIAG_DIR");
+                      let raw = raw.to_str().ok_or_else(|| anyhow!("invalid threshold encoding"))?;
+                      let value: f32 = raw.parse().context("invalid KOHARU_DIAG_TEXT_THRESHOLD")?;
+                      anyhow::ensure!(value.is_finite() && value > 0.0 && value <= 1.0, "text threshold must be in (0, 1]");
+                      thresholds.text = value;
+                  }
+                  if let Some(folder) = std::env::var_os("KOHARU_DIAG_DIR") {
+                      let folder = std::path::PathBuf::from(folder);
+                      std::fs::create_dir_all(&folder)?;
+                      std::fs::write(folder.join("text-threshold.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                          "original_text_threshold": original_text_threshold,
+                          "effective_text_threshold": thresholds.text,
+                          "bubble_threshold": thresholds.bubble,
+                          "panel_threshold": thresholds.panel,
+                      }))?)?;
+                  }
+                  Ok(Self {''',
+              'opt-in text threshold experiment')
+
+          conditional_helper = r'''/// Experimental, opt-in recovery using the original detections as authority.
+          fn recover_conditional_text(
+              page: EntityId,
+              baseline: &mut KoharuLayoutDetections,
+              exploratory: KoharuLayoutDetections,
+              normal: f32,
+              low: f32,
+          ) -> Result<()> {
+              let folder = std::path::PathBuf::from(std::env::var_os("KOHARU_DIAG_DIR")
+                  .ok_or_else(|| anyhow!("conditional recovery requires KOHARU_DIAG_DIR"))?);
+              anyhow::ensure!(baseline.image_width == exploratory.image_width
+                  && baseline.image_height == exploratory.image_height, "inconsistent detector image dimensions");
+              // Compute precisely the normal NMS survivor indices, without changing baseline.
+              let original = &baseline.detections;
+              let mut indices: Vec<usize> = (0..original.len()).collect();
+              indices.sort_by(|&left, &right| {
+                  original[right].score.total_cmp(&original[left].score)
+                      .then_with(|| detection_order(&original[left], &original[right]))
+              });
+              let mut kept: Vec<usize> = Vec::new();
+              for index in indices {
+                  let candidate = &original[index];
+                  if !kept.iter().any(|&i| {
+                      let existing = &original[i];
+                      existing.label == candidate.label
+                          && (intersection_over_union(existing.bbox, candidate.bbox) >= 0.5
+                              || overlap_over_smaller(existing.bbox, candidate.bbox) >= NMS_CONTAINMENT_THRESHOLD)
+                  }) {
+                      kept.push(index);
+                  }
+              }
+              let mut records = Vec::new();
+              let mut eligible = Vec::new();
+              for (wide_index, wide) in exploratory.detections.iter().enumerate() {
+                  if wide.label != "text" || !wide.score.is_finite() || wide.score < low || wide.score >= normal {
+                      continue;
+                  }
+                  let conflicts: Vec<usize> = kept.iter().copied().filter(|&i| {
+                      let other = &original[i];
+                      other.label == "text"
+                          && (intersection_over_union(wide.bbox, other.bbox) >= 0.5
+                              || overlap_over_smaller(wide.bbox, other.bbox) >= NMS_CONTAINMENT_THRESHOLD)
+                  }).collect();
+                  if conflicts.len() != 1 { continue; }
+                  let narrow_index = conflicts[0];
+                  let narrow = &original[narrow_index];
+                  let narrow_box_area = area(narrow.bbox);
+                  if narrow_box_area <= 0.0 || narrow.score < normal || wide.score >= narrow.score
+                      || containment(wide.bbox, narrow.bbox) < 0.99 { continue; }
+                  let ratio = area(wide.bbox) / narrow_box_area;
+                  if !(1.5..=4.0).contains(&ratio) { continue; }
+                  // Only bubbles retained by the original detector/NMS can authorize recovery.
+                  let same_bubble = kept.iter().any(|&i| {
+                      let bubble = &original[i];
+                      bubble.label == "bubble"
+                          && containment(bubble.bbox, wide.bbox) >= 0.95
+                          && containment(bubble.bbox, narrow.bbox) >= 0.95
+                          && mask_containment(&bubble.mask, &wide.mask, wide.bbox) >= 0.9
+                          && mask_containment(&bubble.mask, &narrow.mask, narrow.bbox) >= 0.9
+                  });
+                  let coverage = mask_containment(&wide.mask, &narrow.mask, narrow.bbox);
+                  let narrow_pixels = narrow.mask.pixels.iter().filter(|v| **v != 0).count();
+                  let width = wide.mask.width as usize;
+                  let mut outside = 0usize;
+                  if width != 0 {
+                      for (index, &value) in wide.mask.pixels.iter().enumerate() {
+                          if value == 0 { continue; }
+                          let x = (index % width) as f32;
+                          let y = (index / width) as f32;
+                          if x < narrow.bbox[0] || x >= narrow.bbox[2]
+                              || y < narrow.bbox[1] || y >= narrow.bbox[3] { outside += 1; }
+                      }
+                  }
+                  let accepted = same_bubble && coverage >= 0.8
+                      && outside >= 100usize.max(narrow_pixels / 10);
+                  if accepted { eligible.push((wide_index, narrow_index)); }
+                  records.push(serde_json::json!({
+                      "wide_exploratory_index": wide_index, "narrow_reference_index": narrow_index,
+                      "wide_score": wide.score, "narrow_score": narrow.score,
+                      "wide_bbox": wide.bbox, "narrow_bbox": narrow.bbox,
+                      "box_area_ratio": ratio, "same_reference_bubble_mask": same_bubble,
+                      "narrow_mask_covered": coverage, "narrow_mask_pixels": narrow_pixels,
+                      "wide_mask_pixels_outside_narrow_box": outside, "eligible": accepted
+                  }));
+              }
+              let promoted = if eligible.len() == 1 {
+                  let (wide, narrow) = eligible[0];
+                  let candidate = exploratory.detections.into_iter().nth(wide)
+                      .ok_or_else(|| anyhow!("exploratory index missing"))?;
+                  // Preserve every normal NMS survivor except the one replaced. Do not allow
+                  // previously suppressed normal proposals or other exploratory regions to enter.
+                  baseline.detections = std::mem::take(&mut baseline.detections).into_iter().enumerate()
+                      .filter_map(|(i, d)| (i != narrow && kept.contains(&i)).then_some(d)).collect();
+                  baseline.detections.push(candidate);
+                  Some(serde_json::json!({"wide_exploratory_index": wide, "removed_reference_index": narrow}))
+              } else { None };
+              std::fs::write(folder.join(format!("{page}_conditional-text.json")),
+                  serde_json::to_vec_pretty(&serde_json::json!({
+                      "reference_threshold": normal, "exploratory_threshold": low,
+                      "reference_nms_count": kept.len(), "pairs": records,
+                      "eligible_count": eligible.len(), "promoted": promoted,
+                  }))?)?;
+              Ok(())
+          }
+          '''
+          d = replace_once(d,
+              'fn non_maximum_suppression(detections: &mut Vec<KoharuLayoutDetection>, threshold: f32) {',
+              conditional_helper + 'fn non_maximum_suppression(detections: &mut Vec<KoharuLayoutDetection>, threshold: f32) {',
+              'conditional recovery helper')
+          d = replace_once(d,
+              '        let output = self.detect(image.clone()).await?;\n        log_detector_output_hash(page, &output);',
+              r'''        let mut output = self.detect(image.clone()).await?;
+                  if std::env::var_os("KOHARU_DIAG_CONDITIONAL_TEXT")
+                      .is_some_and(|value| value == std::ffi::OsStr::new("1")) {
+                      anyhow::ensure!(std::env::var_os("KOHARU_DIAG_DIR").is_some(), "conditional recovery requires KOHARU_DIAG_DIR");
+                      anyhow::ensure!(input.region.is_none(), "conditional recovery experiment requires a full page");
+                      anyhow::ensure!((self.thresholds.text - 0.25).abs() < 0.000001, "conditional recovery requires the original 0.25 threshold");
+                      let mut exploratory_thresholds = self.thresholds;
+                      exploratory_thresholds.text = 0.1875;
+                      export_detection_snapshot(page, "reference", &output.detections, output.image_width, output.image_height)?;
+                      let exploratory = self.detect_with_thresholds(image.clone(), exploratory_thresholds).await?;
+                      export_detection_snapshot(page, "exploratory", &exploratory.detections, exploratory.image_width, exploratory.image_height)?;
+                      recover_conditional_text(page, &mut output, exploratory, self.thresholds.text, exploratory_thresholds.text)?;
+                  }
+                  log_detector_output_hash(page, &output);''',
+              'conditional two-pass detector')
+          d = replace_once(d,
+              '        let network = self.network.clone();\n        let thresholds = self.thresholds;\n        tokio::task::spawn_blocking(move || {',
+              r'''        self.detect_with_thresholds(image, self.thresholds).await
+              }
+
+              async fn detect_with_thresholds(&self, image: Arc<DynamicImage>, thresholds: KoharuLayoutThresholds) -> Result<KoharuLayoutDetections> {
+                  let network = self.network.clone();
+                  tokio::task::spawn_blocking(move || {''',
+              'explicit inference thresholds')
+
+          sfx_helper = r'''/// Experimental exact-mask cross-class conflict resolution; off unless explicitly enabled.
+          fn protect_sfx_conflicts(page: EntityId, detections: &mut Vec<KoharuLayoutDetection>) -> Result<()> {
+              let folder = std::path::PathBuf::from(std::env::var_os("KOHARU_DIAG_DIR")
+                  .ok_or_else(|| anyhow!("SFX protection requires KOHARU_DIAG_DIR"))?);
+              let mut rejected = Vec::new();
+              let mut records = Vec::new();
+              for (index, text) in detections.iter().enumerate() {
+                  if text.label != "text" || !text.score.is_finite() || text.mask.pixels.iter().all(|v| *v == 0) { continue; }
+                  let best = detections.iter().enumerate().filter(|(_, sfx)| {
+                      sfx.label == "onomatopoeia" && sfx.score.is_finite()
+                          && sfx.bbox == text.bbox && sfx.mask.width == text.mask.width
+                          && sfx.mask.height == text.mask.height && sfx.mask.pixels == text.mask.pixels
+                  }).max_by(|(_, a), (_, b)| a.score.total_cmp(&b.score));
+                  let Some((sfx_index, sfx)) = best else { continue; };
+                  // Fail closed on inconsistent mask sizes, and protect any ink touching a detected bubble.
+                  let outside_bubbles = detections.iter().filter(|b| b.label == "bubble").all(|b| {
+                      b.mask.width == text.mask.width && b.mask.height == text.mask.height
+                          && b.mask.pixels.len() == text.mask.pixels.len()
+                          && !b.mask.pixels.iter().zip(&text.mask.pixels).any(|(b, t)| *b != 0 && *t != 0)
+                  });
+                  let protect = outside_bubbles && sfx.score >= 0.5 && sfx.score - text.score >= 0.1;
+                  if protect { rejected.push(index); }
+                  records.push(serde_json::json!({
+                      "text_index": index, "sfx_index": sfx_index, "bbox": text.bbox,
+                      "text_score": text.score, "sfx_score": sfx.score,
+                      "mask_blake3": blake3::hash(&text.mask.pixels).to_hex().to_string(),
+                      "outside_bubbles": outside_bubbles, "protected": protect,
+                  }));
+              }
+              std::fs::create_dir_all(&folder)?;
+              std::fs::write(folder.join(format!("{page}_sfx-protection.json")),
+                  serde_json::to_vec_pretty(&serde_json::json!({"conflicts": records, "protected_count": rejected.len()}))?)?;
+              // Remove only the duplicate text classification, never the SFX region or unrelated text.
+              let mut index = 0usize;
+              detections.retain(|_| { let keep = !rejected.contains(&index); index += 1; keep });
+              Ok(())
+          }
+          
+          '''
+          d = replace_once(d,
+              'fn non_maximum_suppression(detections: &mut Vec<KoharuLayoutDetection>, threshold: f32) {',
+              sfx_helper + 'fn non_maximum_suppression(detections: &mut Vec<KoharuLayoutDetection>, threshold: f32) {',
+              'exact mask SFX conflict helper')
+          d = replace_once(d,
+              '    non_maximum_suppression(&mut detections, 0.5);\n    sort_by_layout(&mut detections);\n    export_detection_snapshot(page, "kept", &detections, size.width, size.height)?;',
+              r'''    non_maximum_suppression(&mut detections, 0.5);
+              if std::env::var_os("KOHARU_DIAG_PROTECT_SFX")
+                  .is_some_and(|value| value == std::ffi::OsStr::new("1")) {
+                  anyhow::ensure!(input.region.is_none(), "SFX protection experiment requires a full page");
+                  export_detection_snapshot(page, "before-sfx", &detections, size.width, size.height)?;
+                  protect_sfx_conflicts(page, &mut detections)?;
+              }
+              sort_by_layout(&mut detections);
+              export_detection_snapshot(page, "kept", &detections, size.width, size.height)?;''',
+              'opt-in SFX protection before region creation')
+
+          # Translation trace and independent request-level context switches, opt-in only.
+          t = translation_path.read_text(encoding='utf-8')
+          helper = r'''/// Local experimental trace: only enabled by an explicit mode and output folder.
+          fn translation_diagnostic() -> Result<Option<(std::path::PathBuf, String)>> {
+              let Some(mode) = std::env::var_os("KOHARU_DIAG_TRANSLATION_MODE") else {
+                  return Ok(None);
+              };
+              let mode = mode.into_string().map_err(|_| anyhow::anyhow!("invalid translation diagnostic mode encoding"))?;
+              anyhow::ensure!(matches!(mode.as_str(), "full" | "profile-only" | "context-only" | "none"),
+                  "translation diagnostic mode must be full, profile-only, context-only or none");
+              let folder = std::env::var_os("KOHARU_DIAG_DIR")
+                  .ok_or_else(|| anyhow::anyhow!("translation diagnostic mode requires KOHARU_DIAG_DIR"))?;
+              let folder = std::path::PathBuf::from(folder);
+              std::fs::create_dir_all(&folder)?;
+              Ok(Some((folder, mode)))
+          }
+          
+          fn diagnostic_profile(profile: &TranslationProfile) -> serde_json::Value {
+              serde_json::json!({
+                  "series": &profile.series, "synopsis": &profile.synopsis, "register": &profile.register,
+                  "characters": profile.characters.iter().map(|term| serde_json::json!({
+                      "source": &term.source, "target": &term.target, "note": &term.note,
+                  })).collect::<Vec<_>>(),
+                  "glossary": profile.glossary.iter().map(|term| serde_json::json!({
+                      "source": &term.source, "target": &term.target, "note": &term.note,
+                  })).collect::<Vec<_>>(),
+              })
+          }
+          
+          '''
+          t = replace_once(t, 'pub(super) struct Processor {', helper + 'pub(super) struct Processor {', 'translation trace helpers')
+          t = replace_once(t,
+              '        let mut targets = Vec::new();\n        let mut source_language = None;',
+              r'''        let diag = translation_diagnostic()?;
+                  let profile_enabled = diag.as_ref().map_or(true, |(_, mode)| matches!(mode.as_str(), "full" | "profile-only"));
+                  let context_enabled = diag.as_ref().map_or(true, |(_, mode)| matches!(mode.as_str(), "full" | "context-only"));
+                  let mut targets = Vec::new();
+                  let mut source_language = None;''', 'translation mode switches')
+          t = replace_once(t,
+              '        let (profile, learned) = self\n            .document_profile(&input.scene, source_language, &input.glossary)\n            .await?;',
+              r'''        // Keep the profile-generation call and persistence in all four arms.
+                  // Only inclusion in the translation request changes; this isolates that channel.
+                  let profile_was_stored = if diag.is_some() {
+                      input.scene.project_component::<DocumentProfile>()?.is_some()
+                  } else { false };
+                  let profile_input_segments = if diag.is_some() && !profile_was_stored {
+                      Some(chapter_segments(&input.scene)?)
+                  } else { None };
+                  let (profile, learned) = self
+                      .document_profile(&input.scene, source_language, &input.glossary)
+                      .await?;
+                  let profile_trace = if diag.is_some() { profile.as_ref().map(diagnostic_profile) } else { None };''', 'trace profile input and resolved profile')
+          t = replace_once(t,
+              '        if let Some(profile) = profile {\n            request = request.with_profile(profile);\n        }\n        let context = chapter_context(&input.scene, input.page)?;\n        if !context.is_empty() {\n            request = request.with_context(context);\n        }',
+              r'''        let profile_sent = profile_enabled && profile.is_some();
+                  if profile_enabled {
+                      if let Some(profile) = profile {
+                          request = request.with_profile(profile);
+                      }
+                  }
+                  let context = chapter_context(&input.scene, input.page)?;
+                  let context_sent = context_enabled && !context.is_empty();
+                  if let Some((folder, mode)) = &diag {
+                      let record = serde_json::json!({
+                          "kind": "koharu-translation-input-v1", "page": input.page.to_string(), "mode": mode,
+                          "source_language": source_language.as_ref().map(|language| language.tag()),
+                          "target_language": self.config.target_language.tag(),
+                          "targets": targets.iter().enumerate().map(|(index, (entity, source))| serde_json::json!({
+                              "index": index, "content": entity.to_string(), "source": source,
+                          })).collect::<Vec<_>>(),
+                          "profile_was_stored": profile_was_stored,
+                          "profile_learned_on_this_page": learned.is_some(),
+                          "profile_input_segments": profile_input_segments,
+                          "resolved_profile": profile_trace, "profile_sent": profile_sent,
+                          "available_context": context.iter().map(|pair| serde_json::json!({
+                              "source": &pair.source, "translation": &pair.translation,
+                          })).collect::<Vec<_>>(),
+                          "context_sent": context_sent,
+                          "instructions": self.config.instructions.as_deref(),
+                      });
+                      std::fs::write(folder.join(format!("{}_translation-input.json", input.page)), serde_json::to_vec_pretty(&record)?)?;
+                  }
+                  if context_sent {
+                      request = request.with_context(context);
+                  }''', 'independent profile/context request and local inputs')
+          t = replace_once(t,
+              '        let language = LanguageTag::new(self.config.target_language.tag())?;',
+              r'''        let mut returned_trace = diag.as_ref().map(|_| serde_json::json!({
+                      "kind": "koharu-translation-output-v1", "page": input.page.to_string(),
+                      "expected_segments": targets.len(),
+                      "returned_segments": translated.iter().collect::<Vec<_>>(),
+                  }));
+                  let mut applied_trace = Vec::new();
+                  let language = LanguageTag::new(self.config.target_language.tag())?;''', 'trace returned parsed segments')
+          t = replace_once(t,
+              '            edit.set(\n                entity,\n                &Translation {\n                    text: Authored::generated(text, generated.clone()),',
+              r'''            if diag.is_some() {
+                          applied_trace.push(serde_json::json!({
+                              "content": entity.to_string(), "source": source, "translation": &text,
+                          }));
+                      }
+                      edit.set(
+                          entity,
+                          &Translation {
+                              text: Authored::generated(text, generated.clone()),''', 'trace final normalized translations')
+          t = replace_once(t,
+              '        finish(edit)\n    }\n}',
+              r'''        if let (Some((folder, _)), Some(record)) = (&diag, returned_trace.as_mut()) {
+                      record["applied"] = serde_json::json!(applied_trace);
+                      std::fs::write(folder.join(format!("{}_translation-output.json", input.page)), serde_json::to_vec_pretty(record)?)?;
+                  }
+                  finish(edit)
+              }
+          }''', 'write parsed and applied segment trace')
+          # Associate each OCR reading with the exact crop, content and cache key.
+          o = replace_once(o,
+              '        results.extend(inferred);\n\n        let generation = generation(PRODUCER, model_name)?;',
+              r'''        results.extend(inferred);
+                  if std::env::var_os("KOHARU_DIAG_TRANSLATION_MODE").is_some() {
+                      let folder = std::path::PathBuf::from(std::env::var_os("KOHARU_DIAG_DIR")
+                          .ok_or_else(|| anyhow!("translation diagnostic mode requires KOHARU_DIAG_DIR"))?);
+                      std::fs::create_dir_all(&folder)?;
+                      let record = serde_json::json!({
+                          "kind": "koharu-ocr-text-link-v1", "page": page.to_string(), "model": model_name,
+                          "cache_hits": hits, "cache_misses": misses,
+                          "readings": results.iter().map(|result| serde_json::json!({
+                              "content": result.content.to_string(), "region": result.region.to_string(),
+                              "cache_key": &result.key, "text": &result.text,
+                              "crop_file": format!("{page}_ocr_{}.png", result.region),
+                          })).collect::<Vec<_>>(),
+                      });
+                      std::fs::write(folder.join(format!("{page}_ocr-readings.json")), serde_json::to_vec_pretty(&record)?)?;
+                  }
+          
+                  let generation = generation(PRODUCER, model_name)?;''', 'link OCR crop/cache/content')
+          # Optional experiment: use English for both profile and translation, leaving OCR/cache unchanged.
+          t = replace_once(t,
+              '        let profile_was_stored = if diag.is_some() {',
+              r'''        let detected_source_language = source_language;
+                  if let Some(value) = std::env::var_os("KOHARU_DIAG_SOURCE_LANGUAGE") {
+                      if diag.is_none() || value.to_str() != Some("en-US") {
+                          anyhow::bail!("KOHARU_DIAG_SOURCE_LANGUAGE requires diagnostic mode and en-US");
+                      }
+                      source_language = Some(koharu_translator::Language::English);
+                  }
+                  let profile_was_stored = if diag.is_some() {''', 'optional explicit English source')
+          t = replace_once(t,
+              '            "source_language": source_language.as_ref().map(|language| language.tag()),',
+              '            "detected_source_language": detected_source_language.as_ref().map(|language| language.tag()),\n            "source_language": source_language.as_ref().map(|language| language.tag()),',
+              'trace detected and effective source language')
+          # Optional lexical-only policy: do not change generation or stored profile.
+          lexical_helper = r'''/// Experimental: match whole alphanumeric tokens, ignoring case and punctuation.
+          fn lexical_tokens(text: &str) -> Vec<String> {
+              text.split(|c: char| !c.is_alphanumeric())
+                  .filter(|part| !part.is_empty())
+                  .map(|part| part.to_lowercase())
+                  .collect()
+          }
+
+          fn lexical_source_present(source: &str, chapter: &[Vec<String>]) -> bool {
+              let needle = lexical_tokens(source);
+              if needle.is_empty() || source.chars().filter(|c| c.is_alphabetic()).count() < 2 {
+                  return false;
+              }
+              chapter.iter().any(|line| line.windows(needle.len()).any(|window| window == needle.as_slice()))
+          }
+
+          fn lexical_profile(mut profile: TranslationProfile, segments: &[String]) -> TranslationProfile {
+              let chapter: Vec<Vec<String>> = segments.iter().map(|text| lexical_tokens(text)).collect();
+              profile.series = None;
+              profile.synopsis = None;
+              profile.register = None;
+              profile.characters.retain_mut(|term| {
+                  term.note = None;
+                  !term.target.trim().is_empty() && lexical_source_present(&term.source, &chapter)
+              });
+              profile.glossary.retain_mut(|term| {
+                  term.note = None;
+                  !term.target.trim().is_empty() && lexical_source_present(&term.source, &chapter)
+              });
+              profile
+          }
+
+          '''
+          t = replace_once(t, 'pub(super) struct Processor {', lexical_helper + 'pub(super) struct Processor {', 'lexical profile helpers')
+          t = replace_once(t,
+              '        let profile_trace = if diag.is_some() { profile.as_ref().map(diagnostic_profile) } else { None };',
+              r'''        let raw_profile_trace = if diag.is_some() { profile.as_ref().map(diagnostic_profile) } else { None };
+                  let lexical_policy = match std::env::var_os("KOHARU_DIAG_PROFILE_POLICY") {
+                      None => false,
+                      Some(value) => {
+                          anyhow::ensure!(diag.is_some() && value.to_str() == Some("lexical")
+                              && source_language.as_ref().map(|language| language.tag()) == Some("en-US")
+                              && input.glossary.is_empty(),
+                              "lexical profile experiment requires diagnostic mode, English source and no fixed glossary");
+                          true
+                      }
+                  };
+                  let profile = if lexical_policy {
+                      let segments = chapter_segments(&input.scene)?;
+                      profile.map(|p| lexical_profile(p, &segments)).filter(|p| !p.is_empty())
+                  } else { profile };
+                  let profile_trace = if diag.is_some() { profile.as_ref().map(diagnostic_profile) } else { None };''', 'lexical profile policy before request')
+          t = replace_once(t,
+              '            "resolved_profile": profile_trace, "profile_sent": profile_sent,',
+              '            "raw_profile": raw_profile_trace,\n            "profile_policy": if lexical_policy { "lexical" } else { "original" },\n            "resolved_profile": profile_trace, "profile_sent": profile_sent,',
+              'trace raw and filtered profile')
+
+          translation_path.write_text(t, encoding='utf-8', newline='\n')
+
+          detection_path.write_text(d, encoding='utf-8', newline='\n')
+          ocr_path.write_text(o, encoding='utf-8', newline='\n')
+          # The pipeline already supports Hayai; expose that existing implementation to batch.
+          c = cli_path.read_text(encoding='utf-8')
+          c = replace_once(c,
+              '    #[value(name = "baberu-ocr")]\n    BaberuOcr,\n}',
+              '    #[value(name = "baberu-ocr")]\n    BaberuOcr,\n    #[value(name = "hayai-ocr")]\n    HayaiOcr,\n}',
+              'batch OCR choice')
+          c = replace_once(c,
+              '            OcrChoice::BaberuOcr => OcrModel::BaberuOcr,',
+              '            OcrChoice::BaberuOcr => OcrModel::BaberuOcr,\n            OcrChoice::HayaiOcr => OcrModel::HayaiOcr,',
+              'batch OCR mapping')
+          cli_path.write_text(c, encoding='utf-8', newline='\n')
+          print('Instrumentation applied only to detection.rs, ocr.rs, translation.rs and batch/cli.rs')
+          '@
+          $patchScript = Join-Path $env:RUNNER_TEMP 'apply_koharu_diagnostic.py'
+          [System.IO.File]::WriteAllText($patchScript, $patch, [System.Text.UTF8Encoding]::new($false))
+          python $patchScript
+          if ($LASTEXITCODE -ne 0) { throw 'Source diagnostic patch failed' }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid source diff' }
+          $changes = @((git diff --name-only) | Where-Object { $_ -ne '' })
+          $expectedChanges = @(
+              'crates/koharu-pipeline/src/stages/detection.rs',
+              'crates/koharu-pipeline/src/stages/ocr.rs',
+              'crates/koharu-pipeline/src/stages/translation.rs',
+              'crates/koharu-pipeline/src/batch/cli.rs'
+          )
+          if ($changes.Count -ne 4 -or (@($changes | Where-Object { $_ -notin $expectedChanges })).Count -ne 0) {
+            throw "Unexpected changed files: $($changes -join ', ')"
+          }
+          git diff --stat
+          Write-Host 'Only detection.rs, ocr.rs, translation.rs and batch/cli.rs changed locally in temporary runner'
+
+      - name: Build a separate diagnostic executable
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cargo build --release --locked -p koharu-pipeline --bin koharu-batch
+
+      - name: Hash diagnostic executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'target/release/koharu-batch.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Diagnostic EXE missing' }
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          Write-Host "KOHARU_HAYAI_OCR_SHA256=$hash"
+          "$hash  koharu-batch.exe" | Set-Content -Path 'target/release/koharu-batch-hayai-ocr-sha256.txt' -Encoding ascii
+
+      - name: Upload ONLY diagnostic binary + hash (no user images)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: koharu-batch-v0.89.0-hayai-ocr-experiment
+          path: |
+            target/release/koharu-batch.exe
+            target/release/koharu-batch-hayai-ocr-sha256.txt
+          if-no-files-found: error
+          retention-days: 7
