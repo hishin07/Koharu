@@ -1,0 +1,393 @@
+name: Koharu v0.89.0 - EN-FR Consolidated Candidate v1
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Pinned Windows consolidated candidate - no manga data
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout exactly the audited public source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: Endymi0n74/Koharu
+          ref: 30db248cb365e630a94f44bf7e02e87bd5dc8c6b
+          persist-credentials: false
+
+      - name: Verify exact commit
+        shell: pwsh
+        run: |
+          $expected = '30db248cb365e630a94f44bf7e02e87bd5dc8c6b'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) {
+            throw "Unexpected source commit: $actual"
+          }
+          Write-Host "Audited commit confirmed: $actual"
+
+      - name: Apply pinned EN-FR candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $patch = @'
+          #!/usr/bin/env python3
+          """Apply the audited EN-FR candidate to the pinned public source. No private data."""
+          from pathlib import Path
+          import hashlib
+
+          EXPECTED = {'crates/koharu-pipeline/src/stages/detection.rs': 'FD2AF1D05CD4BDBA56D4910630CC2F2C5381173A99E658C64FBC0615A5229EB5', 'crates/koharu-pipeline/src/stages/ocr.rs': 'DBC5B030B8AF7F36A889E41708F3DECAC45EAEE9F7136C95058E6EE63B44ACEF', 'crates/koharu-pipeline/src/stages/translation.rs': '20FE634959BBA51E9356540530BC34C4DD2E9A289188A7679B3CC753846CF469', 'crates/koharu-pipeline/src/batch/run.rs': '67B9FF4351F5246CE57E34AEBBAC2370D3B00CFF2DD75D1E73DAA4D17D9C87B4'}
+
+          def replace_once(text, before, after, label):
+              count = text.count(before)
+              if count != 1:
+                  raise SystemExit(f"FATAL: {label}: expected one anchor, got {count}")
+              return text.replace(before, after, 1)
+
+          for name, expected in EXPECTED.items():
+              actual = hashlib.sha256(Path(name).read_bytes().replace(b"\r\n", b"\n")).hexdigest().upper()
+              if actual != expected:
+                  raise SystemExit(f"FATAL: unexpected source content: {name}: {actual}")
+
+          path = Path('crates/koharu-pipeline/src/stages/detection.rs')
+          text = path.read_text(encoding="utf-8")
+          text = replace_once(text, 'fn non_maximum_suppression(detections: &mut Vec<KoharuLayoutDetection>, threshold: f32) {', r'''/// Conservative recovery using the original detections as authority.
+          fn recover_conditional_text(
+              page: EntityId,
+              baseline: &mut KoharuLayoutDetections,
+              exploratory: KoharuLayoutDetections,
+              normal: f32,
+              low: f32,
+          ) -> Result<()> {
+              anyhow::ensure!(baseline.image_width == exploratory.image_width
+                  && baseline.image_height == exploratory.image_height, "inconsistent detector image dimensions");
+              // Compute precisely the normal NMS survivor indices, without changing baseline.
+              let original = &baseline.detections;
+              let mut indices: Vec<usize> = (0..original.len()).collect();
+              indices.sort_by(|&left, &right| {
+                  original[right].score.total_cmp(&original[left].score)
+                      .then_with(|| detection_order(&original[left], &original[right]))
+              });
+              let mut kept: Vec<usize> = Vec::new();
+              for index in indices {
+                  let candidate = &original[index];
+                  if !kept.iter().any(|&i| {
+                      let existing = &original[i];
+                      existing.label == candidate.label
+                          && (intersection_over_union(existing.bbox, candidate.bbox) >= 0.5
+                              || overlap_over_smaller(existing.bbox, candidate.bbox) >= NMS_CONTAINMENT_THRESHOLD)
+                  }) {
+                      kept.push(index);
+                  }
+              }
+              let mut eligible = Vec::new();
+              for (wide_index, wide) in exploratory.detections.iter().enumerate() {
+                  if wide.label != "text" || !wide.score.is_finite() || wide.score < low || wide.score >= normal {
+                      continue;
+                  }
+                  let conflicts: Vec<usize> = kept.iter().copied().filter(|&i| {
+                      let other = &original[i];
+                      other.label == "text"
+                          && (intersection_over_union(wide.bbox, other.bbox) >= 0.5
+                              || overlap_over_smaller(wide.bbox, other.bbox) >= NMS_CONTAINMENT_THRESHOLD)
+                  }).collect();
+                  if conflicts.len() != 1 { continue; }
+                  let narrow_index = conflicts[0];
+                  let narrow = &original[narrow_index];
+                  let narrow_box_area = area(narrow.bbox);
+                  if narrow_box_area <= 0.0 || narrow.score < normal || wide.score >= narrow.score
+                      || containment(wide.bbox, narrow.bbox) < 0.99 { continue; }
+                  let ratio = area(wide.bbox) / narrow_box_area;
+                  if !(1.5..=4.0).contains(&ratio) { continue; }
+                  // Only bubbles retained by the original detector/NMS can authorize recovery.
+                  let same_bubble = kept.iter().any(|&i| {
+                      let bubble = &original[i];
+                      bubble.label == "bubble"
+                          && containment(bubble.bbox, wide.bbox) >= 0.95
+                          && containment(bubble.bbox, narrow.bbox) >= 0.95
+                          && mask_containment(&bubble.mask, &wide.mask, wide.bbox) >= 0.9
+                          && mask_containment(&bubble.mask, &narrow.mask, narrow.bbox) >= 0.9
+                  });
+                  let coverage = mask_containment(&wide.mask, &narrow.mask, narrow.bbox);
+                  let narrow_pixels = narrow.mask.pixels.iter().filter(|v| **v != 0).count();
+                  let width = wide.mask.width as usize;
+                  let mut outside = 0usize;
+                  if width != 0 {
+                      for (index, &value) in wide.mask.pixels.iter().enumerate() {
+                          if value == 0 { continue; }
+                          let x = (index % width) as f32;
+                          let y = (index / width) as f32;
+                          if x < narrow.bbox[0] || x >= narrow.bbox[2]
+                              || y < narrow.bbox[1] || y >= narrow.bbox[3] { outside += 1; }
+                      }
+                  }
+                  let accepted = same_bubble && coverage >= 0.8
+                      && outside >= 100usize.max(narrow_pixels / 10);
+                  if accepted { eligible.push((wide_index, narrow_index)); }
+              }
+              // Veto only an otherwise unique promotion; never introduce a new promotion.
+              let overlapping_neighbors: Vec<usize> = if eligible.len() == 1 {
+                  let (wide_index, narrow_index) = eligible[0];
+                  let wide = exploratory.detections[wide_index].bbox;
+                  kept.iter().copied().filter(|&i| {
+                      let other = &original[i];
+                      i != narrow_index && other.label == "text"
+                          && wide[0] < other.bbox[2] && wide[2] > other.bbox[0]
+                          && wide[1] < other.bbox[3] && wide[3] > other.bbox[1]
+                  }).collect()
+              } else { Vec::new() };
+              let blocked_by_neighbor = !overlapping_neighbors.is_empty();
+              if eligible.len() == 1 && !blocked_by_neighbor {
+                  let (wide, narrow) = eligible[0];
+                  let candidate = exploratory.detections.into_iter().nth(wide)
+                      .ok_or_else(|| anyhow!("exploratory index missing"))?;
+                  // Preserve every normal NMS survivor except the one replaced. Do not allow
+                  // previously suppressed normal proposals or other exploratory regions to enter.
+                  baseline.detections = std::mem::take(&mut baseline.detections).into_iter().enumerate()
+                      .filter_map(|(i, d)| (i != narrow && kept.contains(&i)).then_some(d)).collect();
+                  baseline.detections.push(candidate);
+                  tracing::info!(%page, "conditional text recovery promoted one region");
+              } else if blocked_by_neighbor {
+                  tracing::info!(%page, "conditional text recovery vetoed by neighboring text");
+              }
+              Ok(())
+          }
+
+          /// Conservative exact-mask cross-class conflict resolution.
+          fn protect_sfx_conflicts(page: EntityId, detections: &mut Vec<KoharuLayoutDetection>) -> Result<()> {
+              let mut rejected = Vec::new();
+              for (index, text) in detections.iter().enumerate() {
+                  if text.label != "text" || !text.score.is_finite() || text.mask.pixels.iter().all(|v| *v == 0) { continue; }
+                  let best = detections.iter().enumerate().filter(|(_, sfx)| {
+                      sfx.label == "onomatopoeia" && sfx.score.is_finite()
+                          && sfx.bbox == text.bbox && sfx.mask.width == text.mask.width
+                          && sfx.mask.height == text.mask.height && sfx.mask.pixels == text.mask.pixels
+                  }).max_by(|(_, a), (_, b)| a.score.total_cmp(&b.score));
+                  let Some((_sfx_index, sfx)) = best else { continue; };
+                  // Fail closed on inconsistent mask sizes, and protect any ink touching a detected bubble.
+                  let outside_bubbles = detections.iter().filter(|b| b.label == "bubble").all(|b| {
+                      b.mask.width == text.mask.width && b.mask.height == text.mask.height
+                          && b.mask.pixels.len() == text.mask.pixels.len()
+                          && !b.mask.pixels.iter().zip(&text.mask.pixels).any(|(b, t)| *b != 0 && *t != 0)
+                  });
+                  let protect = outside_bubbles && sfx.score >= 0.5 && sfx.score - text.score >= 0.1;
+                  if protect { rejected.push(index); }
+              }
+              if !rejected.is_empty() {
+                  tracing::info!(%page, protected_count = rejected.len(), "protected exact-mask SFX conflicts");
+              }
+              // Remove only the duplicate text classification, never the SFX region or unrelated text.
+              let mut index = 0usize;
+              detections.retain(|_| { let keep = !rejected.contains(&index); index += 1; keep });
+              Ok(())
+          }
+
+
+          fn non_maximum_suppression(detections: &mut Vec<KoharuLayoutDetection>, threshold: f32) {''', 'validated recovery and SFX rules without exports')
+          text = replace_once(text, r'''        let output = self.detect(image.clone()).await?;
+                  log_detector_output_hash(page, &output);''', r'''        let mut output = self.detect(image.clone()).await?;
+                  anyhow::ensure!(input.region.is_none(), "consolidated detector requires a full page");
+                  anyhow::ensure!((self.thresholds.text - 0.25).abs() < 0.000001, "consolidated recovery requires the original 0.25 threshold");
+                  let mut exploratory_thresholds = self.thresholds;
+                  exploratory_thresholds.text = 0.1875;
+                  let exploratory = self.detect_with_thresholds(image.clone(), exploratory_thresholds).await?;
+                  recover_conditional_text(page, &mut output, exploratory, self.thresholds.text, exploratory_thresholds.text)?;
+                  log_detector_output_hash(page, &output);''', 'two-pass detector')
+          text = replace_once(text, r'''        let network = self.network.clone();
+                  let thresholds = self.thresholds;
+                  tokio::task::spawn_blocking(move || {''', r'''        self.detect_with_thresholds(image, self.thresholds).await
+              }
+
+              async fn detect_with_thresholds(&self, image: Arc<DynamicImage>, thresholds: KoharuLayoutThresholds) -> Result<KoharuLayoutDetections> {
+                  let network = self.network.clone();
+                  tokio::task::spawn_blocking(move || {''', 'explicit thresholds')
+          text = replace_once(text, r'''    non_maximum_suppression(&mut detections, 0.5);
+              sort_by_layout(&mut detections);
+
+              let image = image.to_rgb8();''', r'''    non_maximum_suppression(&mut detections, 0.5);
+              protect_sfx_conflicts(page, &mut detections)?;
+              sort_by_layout(&mut detections);
+
+              let image = image.to_rgb8();''', 'SFX before region creation')
+          path.write_text(text, encoding="utf-8", newline="\n")
+
+          path = Path('crates/koharu-pipeline/src/stages/ocr.rs')
+          text = path.read_text(encoding="utf-8")
+          text = replace_once(text, 'const PRODUCER: &str = "dev.koharu.pipeline.ocr";', r'''/// Return counts for an extreme repeated-letter OCR reading (whitespace ignored).
+          fn extreme_ocr_repetition(text: &str) -> Option<(usize, usize)> {
+              let mut total = 0usize;
+              let mut longest = 0usize;
+              let mut run = 0usize;
+              let mut previous = None;
+              for ch in text.chars().filter(|ch| !ch.is_whitespace()) {
+                  total += 1;
+                  if ch.is_alphabetic() {
+                      run = if previous == Some(ch) { run + 1 } else { 1 };
+                      longest = longest.max(run);
+                      previous = Some(ch);
+                  } else {
+                      run = 0;
+                      previous = None;
+                  }
+              }
+              (total >= 128 && longest >= 128 && longest as u128 * 10 >= total as u128 * 9)
+                  .then_some((total, longest))
+          }
+
+          const PRODUCER: &str = "dev.koharu.pipeline.ocr";''', 'extreme OCR classifier')
+          text = replace_once(text, r'''        results.extend(inferred);
+
+                  let generation = generation(PRODUCER, model_name)?;''', r'''        results.extend(inferred);
+
+                  // Preserve raw cache entries; only the effective source text is quarantined.
+                  anyhow::ensure!(model_name == "paddleocr-vl-1.6", "consolidated profile requires PaddleOCR");
+                  for result in &mut results {
+                      if let Some((total, longest)) = extreme_ocr_repetition(&result.text) {
+                          tracing::warn!(%page, region = %result.region, total, longest,
+                              "quarantined extreme OCR repetition; raw reading preserved");
+                          result.text.clear();
+                      }
+                  }
+
+                  let generation = generation(PRODUCER, model_name)?;''', 'quarantine after cache write')
+          path.write_text(text, encoding="utf-8", newline="\n")
+
+          path = Path('crates/koharu-pipeline/src/stages/translation.rs')
+          text = path.read_text(encoding="utf-8")
+          text = replace_once(text, 'pub(super) struct Processor {', r'''/// match whole alphanumeric tokens, ignoring case and punctuation.
+          fn lexical_tokens(text: &str) -> Vec<String> {
+              text.split(|c: char| !c.is_alphanumeric())
+                  .filter(|part| !part.is_empty())
+                  .map(|part| part.to_lowercase())
+                  .collect()
+          }
+
+          fn lexical_source_present(source: &str, chapter: &[Vec<String>]) -> bool {
+              let needle = lexical_tokens(source);
+              if needle.is_empty() || source.chars().filter(|c| c.is_alphabetic()).count() < 2 {
+                  return false;
+              }
+              chapter.iter().any(|line| line.windows(needle.len()).any(|window| window == needle.as_slice()))
+          }
+
+          fn lexical_profile(mut profile: TranslationProfile, segments: &[String]) -> TranslationProfile {
+              let chapter: Vec<Vec<String>> = segments.iter().map(|text| lexical_tokens(text)).collect();
+              profile.series = None;
+              profile.synopsis = None;
+              profile.register = None;
+              profile.characters.retain_mut(|term| {
+                  term.note = None;
+                  !term.target.trim().is_empty() && lexical_source_present(&term.source, &chapter)
+              });
+              profile.glossary.retain_mut(|term| {
+                  term.note = None;
+                  !term.target.trim().is_empty() && lexical_source_present(&term.source, &chapter)
+              });
+              profile
+          }
+
+          pub(super) struct Processor {''', 'lexical filter')
+          text = replace_once(text, r'''        let mut source_language = None;
+          ''', r'''        let source_language = Some(koharu_translator::Language::English);
+          ''', 'English source')
+          text = replace_once(text, r'''                    source_language = source_language.or_else(|| {
+                                  source
+                                      .language
+                                      .as_ref()
+                                      .and_then(|tag| tag.as_str().parse().ok())
+                              });
+          ''', '', 'no OCR language guessing')
+          text = replace_once(text, r'''        let (profile, learned) = self
+                      .document_profile(&input.scene, source_language, &input.glossary)
+                      .await?;''', r'''        anyhow::ensure!(self.config.target_language.tag() == "fr-FR" && input.glossary.is_empty(),
+                      "consolidated lexical profile requires French target and no fixed glossary");
+                  let (profile, learned) = self
+                      .document_profile(&input.scene, source_language, &input.glossary)
+                      .await?;
+                  let segments = chapter_segments(&input.scene)?;
+                  let profile = profile.map(|p| lexical_profile(p, &segments)).filter(|p| !p.is_empty());''', 'lexical-only request, profile generation and persistence unchanged')
+          path.write_text(text, encoding="utf-8", newline="\n")
+
+          path = Path('crates/koharu-pipeline/src/batch/run.rs')
+          text = path.read_text(encoding="utf-8")
+          text = replace_once(text, '    let measurements = if arguments.no_calibration {', r'''    // This dedicated batch variant is deliberately restricted to the audited EN -> FR preset.
+              // Reject incompatible requests before runtime/store initialization; no remote translation provider.
+              anyhow::ensure!(arguments.provider == Provider::Local && arguments.lang.tag() == "fr-FR",
+                  "consolidated EN-FR build requires local provider and fr-FR target");
+              anyhow::ensure!(matches!(arguments.ocr, cli::OcrChoice::PaddleOcrVl1_6)
+                  && matches!(arguments.inpainting, cli::InpaintingChoice::LaMa)
+                  && arguments.glossary.is_empty(), "consolidated build requires PaddleOCR, LaMa and no fixed glossary");
+              let expected_quant = match arguments.llm.as_str() {
+                  "hy-mt2-7b" => "Q4_K_M",
+                  "gemma4-12b-it" => "Q4_K_XL",
+                  _ => bail!("consolidated build accepts only hy-mt2-7b or gemma4-12b-it"),
+              };
+              anyhow::ensure!(arguments.quantization.as_deref().is_none_or(|q| q == expected_quant),
+                  "quantization incompatible with consolidated preset");
+              arguments.quantization = Some(expected_quant.to_owned());
+              const INSTRUCTIONS: &str = "Translate each numbered segment independently. Keep sentence fragments in their own segment, even when the sentence continues in the next segment. Never move words or meaning between segment IDs. Do not invent a reaction to fill an ID. Context and the profile may only clarify meaning; the current source segment always takes priority.";
+              anyhow::ensure!(arguments.translation_instructions.as_deref().is_none_or(|s| s == INSTRUCTIONS),
+                  "custom instructions are not part of the consolidated preset");
+              anyhow::ensure!(arguments.retries == 1, "consolidated preset requires one retry");
+              arguments.translation_instructions = Some(INSTRUCTIONS.to_owned());
+              arguments.deterministic = true;
+              arguments.no_vision = true;
+              arguments.no_calibration = true;
+              if arguments.report.is_none() {
+                  arguments.report = Some("none".to_owned());
+              }
+              tracing::info!(preset = "en-fr-consolidated-v1", model = %arguments.llm,
+                  "using consolidated translation preset");
+              let measurements = if arguments.no_calibration {''', 'dedicated batch preset')
+          path.write_text(text, encoding="utf-8", newline="\n")
+
+          print("Consolidated EN-FR patch applied to exactly four source files")
+          '@
+          $patchScript = Join-Path $env:RUNNER_TEMP 'apply_koharu_consolidated.py'
+          [System.IO.File]::WriteAllText($patchScript, $patch, [System.Text.UTF8Encoding]::new($false))
+          python $patchScript
+          if ($LASTEXITCODE -ne 0) { throw 'Source consolidation patch failed' }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid source diff' }
+          $changes = @((git diff --name-only) | Where-Object { $_ -ne '' })
+          $expectedChanges = @(
+              'crates/koharu-pipeline/src/stages/detection.rs',
+              'crates/koharu-pipeline/src/stages/ocr.rs',
+              'crates/koharu-pipeline/src/stages/translation.rs',
+              'crates/koharu-pipeline/src/batch/run.rs'
+          )
+          if ($changes.Count -ne 4 -or (@($changes | Where-Object { $_ -notin $expectedChanges })).Count -ne 0) {
+            throw "Unexpected changed files: $($changes -join ', ')"
+          }
+          git diff --stat
+          Write-Host 'Only detection.rs, ocr.rs, translation.rs and batch/run.rs changed locally in temporary runner'
+
+      - name: Build a separate consolidated executable
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cargo build --release --locked -p koharu-pipeline --bin koharu-batch
+
+      - name: Hash consolidated executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'target/release/koharu-batch.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Consolidated EXE missing' }
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          Write-Host "KOHARU_EN_FR_CONSOLIDATED_SHA256=$hash"
+          "$hash  koharu-batch.exe" | Set-Content -Path 'target/release/koharu-batch-en-fr-consolidated-v1-sha256.txt' -Encoding ascii
+
+      - name: Upload ONLY consolidated binary + hash (no user images)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: koharu-batch-v0.89.0-en-fr-consolidated-v1
+          path: |
+            target/release/koharu-batch.exe
+            target/release/koharu-batch-en-fr-consolidated-v1-sha256.txt
+          if-no-files-found: error
+          retention-days: 7
