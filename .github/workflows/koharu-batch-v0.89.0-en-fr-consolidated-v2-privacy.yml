@@ -1,0 +1,531 @@
+name: Koharu v0.89.0 - EN-FR Consolidated v2 Privacy Candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Pinned Windows privacy candidate - no manga data
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout exactly the audited public source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: Endymi0n74/Koharu
+          ref: 30db248cb365e630a94f44bf7e02e87bd5dc8c6b
+          persist-credentials: false
+
+      - name: Verify exact commit
+        shell: pwsh
+        run: |
+          $expected = '30db248cb365e630a94f44bf7e02e87bd5dc8c6b'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) {
+            throw "Unexpected source commit: $actual"
+          }
+          Write-Host "Audited commit confirmed: $actual"
+
+      - name: Apply pinned EN-FR and privacy candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $patch = @'
+          #!/usr/bin/env python3
+          """Apply the audited EN-FR candidate to the pinned public source. No private data."""
+          from pathlib import Path
+          import hashlib
+          
+          EXPECTED = {'crates/koharu-pipeline/src/stages/detection.rs': 'FD2AF1D05CD4BDBA56D4910630CC2F2C5381173A99E658C64FBC0615A5229EB5', 'crates/koharu-pipeline/src/stages/ocr.rs': 'DBC5B030B8AF7F36A889E41708F3DECAC45EAEE9F7136C95058E6EE63B44ACEF', 'crates/koharu-pipeline/src/stages/translation.rs': '20FE634959BBA51E9356540530BC34C4DD2E9A289188A7679B3CC753846CF469', 'crates/koharu-pipeline/src/batch/run.rs': '67B9FF4351F5246CE57E34AEBBAC2370D3B00CFF2DD75D1E73DAA4D17D9C87B4'}
+          
+          def replace_once(text, before, after, label):
+              count = text.count(before)
+              if count != 1:
+                  raise SystemExit(f"FATAL: {label}: expected one anchor, got {count}")
+              return text.replace(before, after, 1)
+          
+          for name, expected in EXPECTED.items():
+              actual = hashlib.sha256(Path(name).read_bytes().replace(b"\r\n", b"\n")).hexdigest().upper()
+              if actual != expected:
+                  raise SystemExit(f"FATAL: unexpected source content: {name}: {actual}")
+          
+          path = Path('crates/koharu-pipeline/src/stages/detection.rs')
+          text = path.read_text(encoding="utf-8")
+          text = replace_once(text, 'fn non_maximum_suppression(detections: &mut Vec<KoharuLayoutDetection>, threshold: f32) {', r'''/// Conservative recovery using the original detections as authority.
+          fn recover_conditional_text(
+              page: EntityId,
+              baseline: &mut KoharuLayoutDetections,
+              exploratory: KoharuLayoutDetections,
+              normal: f32,
+              low: f32,
+          ) -> Result<()> {
+              anyhow::ensure!(baseline.image_width == exploratory.image_width
+                  && baseline.image_height == exploratory.image_height, "inconsistent detector image dimensions");
+              // Compute precisely the normal NMS survivor indices, without changing baseline.
+              let original = &baseline.detections;
+              let mut indices: Vec<usize> = (0..original.len()).collect();
+              indices.sort_by(|&left, &right| {
+                  original[right].score.total_cmp(&original[left].score)
+                      .then_with(|| detection_order(&original[left], &original[right]))
+              });
+              let mut kept: Vec<usize> = Vec::new();
+              for index in indices {
+                  let candidate = &original[index];
+                  if !kept.iter().any(|&i| {
+                      let existing = &original[i];
+                      existing.label == candidate.label
+                          && (intersection_over_union(existing.bbox, candidate.bbox) >= 0.5
+                              || overlap_over_smaller(existing.bbox, candidate.bbox) >= NMS_CONTAINMENT_THRESHOLD)
+                  }) {
+                      kept.push(index);
+                  }
+              }
+              let mut eligible = Vec::new();
+              for (wide_index, wide) in exploratory.detections.iter().enumerate() {
+                  if wide.label != "text" || !wide.score.is_finite() || wide.score < low || wide.score >= normal {
+                      continue;
+                  }
+                  let conflicts: Vec<usize> = kept.iter().copied().filter(|&i| {
+                      let other = &original[i];
+                      other.label == "text"
+                          && (intersection_over_union(wide.bbox, other.bbox) >= 0.5
+                              || overlap_over_smaller(wide.bbox, other.bbox) >= NMS_CONTAINMENT_THRESHOLD)
+                  }).collect();
+                  if conflicts.len() != 1 { continue; }
+                  let narrow_index = conflicts[0];
+                  let narrow = &original[narrow_index];
+                  let narrow_box_area = area(narrow.bbox);
+                  if narrow_box_area <= 0.0 || narrow.score < normal || wide.score >= narrow.score
+                      || containment(wide.bbox, narrow.bbox) < 0.99 { continue; }
+                  let ratio = area(wide.bbox) / narrow_box_area;
+                  if !(1.5..=4.0).contains(&ratio) { continue; }
+                  // Only bubbles retained by the original detector/NMS can authorize recovery.
+                  let same_bubble = kept.iter().any(|&i| {
+                      let bubble = &original[i];
+                      bubble.label == "bubble"
+                          && containment(bubble.bbox, wide.bbox) >= 0.95
+                          && containment(bubble.bbox, narrow.bbox) >= 0.95
+                          && mask_containment(&bubble.mask, &wide.mask, wide.bbox) >= 0.9
+                          && mask_containment(&bubble.mask, &narrow.mask, narrow.bbox) >= 0.9
+                  });
+                  let coverage = mask_containment(&wide.mask, &narrow.mask, narrow.bbox);
+                  let narrow_pixels = narrow.mask.pixels.iter().filter(|v| **v != 0).count();
+                  let width = wide.mask.width as usize;
+                  let mut outside = 0usize;
+                  if width != 0 {
+                      for (index, &value) in wide.mask.pixels.iter().enumerate() {
+                          if value == 0 { continue; }
+                          let x = (index % width) as f32;
+                          let y = (index / width) as f32;
+                          if x < narrow.bbox[0] || x >= narrow.bbox[2]
+                              || y < narrow.bbox[1] || y >= narrow.bbox[3] { outside += 1; }
+                      }
+                  }
+                  let accepted = same_bubble && coverage >= 0.8
+                      && outside >= 100usize.max(narrow_pixels / 10);
+                  if accepted { eligible.push((wide_index, narrow_index)); }
+              }
+              // Veto only an otherwise unique promotion; never introduce a new promotion.
+              let overlapping_neighbors: Vec<usize> = if eligible.len() == 1 {
+                  let (wide_index, narrow_index) = eligible[0];
+                  let wide = exploratory.detections[wide_index].bbox;
+                  kept.iter().copied().filter(|&i| {
+                      let other = &original[i];
+                      i != narrow_index && other.label == "text"
+                          && wide[0] < other.bbox[2] && wide[2] > other.bbox[0]
+                          && wide[1] < other.bbox[3] && wide[3] > other.bbox[1]
+                  }).collect()
+              } else { Vec::new() };
+              let blocked_by_neighbor = !overlapping_neighbors.is_empty();
+              if eligible.len() == 1 && !blocked_by_neighbor {
+                  let (wide, narrow) = eligible[0];
+                  let candidate = exploratory.detections.into_iter().nth(wide)
+                      .ok_or_else(|| anyhow!("exploratory index missing"))?;
+                  // Preserve every normal NMS survivor except the one replaced. Do not allow
+                  // previously suppressed normal proposals or other exploratory regions to enter.
+                  baseline.detections = std::mem::take(&mut baseline.detections).into_iter().enumerate()
+                      .filter_map(|(i, d)| (i != narrow && kept.contains(&i)).then_some(d)).collect();
+                  baseline.detections.push(candidate);
+                  tracing::info!(%page, "conditional text recovery promoted one region");
+              } else if blocked_by_neighbor {
+                  tracing::info!(%page, "conditional text recovery vetoed by neighboring text");
+              }
+              Ok(())
+          }
+          
+          /// Conservative exact-mask cross-class conflict resolution.
+          fn protect_sfx_conflicts(page: EntityId, detections: &mut Vec<KoharuLayoutDetection>) -> Result<()> {
+              let mut rejected = Vec::new();
+              for (index, text) in detections.iter().enumerate() {
+                  if text.label != "text" || !text.score.is_finite() || text.mask.pixels.iter().all(|v| *v == 0) { continue; }
+                  let best = detections.iter().enumerate().filter(|(_, sfx)| {
+                      sfx.label == "onomatopoeia" && sfx.score.is_finite()
+                          && sfx.bbox == text.bbox && sfx.mask.width == text.mask.width
+                          && sfx.mask.height == text.mask.height && sfx.mask.pixels == text.mask.pixels
+                  }).max_by(|(_, a), (_, b)| a.score.total_cmp(&b.score));
+                  let Some((_sfx_index, sfx)) = best else { continue; };
+                  // Fail closed on inconsistent mask sizes, and protect any ink touching a detected bubble.
+                  let outside_bubbles = detections.iter().filter(|b| b.label == "bubble").all(|b| {
+                      b.mask.width == text.mask.width && b.mask.height == text.mask.height
+                          && b.mask.pixels.len() == text.mask.pixels.len()
+                          && !b.mask.pixels.iter().zip(&text.mask.pixels).any(|(b, t)| *b != 0 && *t != 0)
+                  });
+                  let protect = outside_bubbles && sfx.score >= 0.5 && sfx.score - text.score >= 0.1;
+                  if protect { rejected.push(index); }
+              }
+              if !rejected.is_empty() {
+                  tracing::info!(%page, protected_count = rejected.len(), "protected exact-mask SFX conflicts");
+              }
+              // Remove only the duplicate text classification, never the SFX region or unrelated text.
+              let mut index = 0usize;
+              detections.retain(|_| { let keep = !rejected.contains(&index); index += 1; keep });
+              Ok(())
+          }
+          
+          
+          fn non_maximum_suppression(detections: &mut Vec<KoharuLayoutDetection>, threshold: f32) {''', 'validated recovery and SFX rules without exports')
+          text = replace_once(text, r'''        let output = self.detect(image.clone()).await?;
+                  log_detector_output_hash(page, &output);''', r'''        let mut output = self.detect(image.clone()).await?;
+                  anyhow::ensure!(input.region.is_none(), "consolidated detector requires a full page");
+                  anyhow::ensure!((self.thresholds.text - 0.25).abs() < 0.000001, "consolidated recovery requires the original 0.25 threshold");
+                  let mut exploratory_thresholds = self.thresholds;
+                  exploratory_thresholds.text = 0.1875;
+                  let exploratory = self.detect_with_thresholds(image.clone(), exploratory_thresholds).await?;
+                  recover_conditional_text(page, &mut output, exploratory, self.thresholds.text, exploratory_thresholds.text)?;
+                  log_detector_output_hash(page, &output);''', 'two-pass detector')
+          text = replace_once(text, r'''        let network = self.network.clone();
+                  let thresholds = self.thresholds;
+                  tokio::task::spawn_blocking(move || {''', r'''        self.detect_with_thresholds(image, self.thresholds).await
+              }
+          
+              async fn detect_with_thresholds(&self, image: Arc<DynamicImage>, thresholds: KoharuLayoutThresholds) -> Result<KoharuLayoutDetections> {
+                  let network = self.network.clone();
+                  tokio::task::spawn_blocking(move || {''', 'explicit thresholds')
+          text = replace_once(text, r'''    non_maximum_suppression(&mut detections, 0.5);
+              sort_by_layout(&mut detections);
+          
+              let image = image.to_rgb8();''', r'''    non_maximum_suppression(&mut detections, 0.5);
+              protect_sfx_conflicts(page, &mut detections)?;
+              sort_by_layout(&mut detections);
+          
+              let image = image.to_rgb8();''', 'SFX before region creation')
+          path.write_text(text, encoding="utf-8", newline="\n")
+          
+          path = Path('crates/koharu-pipeline/src/stages/ocr.rs')
+          text = path.read_text(encoding="utf-8")
+          text = replace_once(text, 'const PRODUCER: &str = "dev.koharu.pipeline.ocr";', r'''/// Return counts for an extreme repeated-letter OCR reading (whitespace ignored).
+          fn extreme_ocr_repetition(text: &str) -> Option<(usize, usize)> {
+              let mut total = 0usize;
+              let mut longest = 0usize;
+              let mut run = 0usize;
+              let mut previous = None;
+              for ch in text.chars().filter(|ch| !ch.is_whitespace()) {
+                  total += 1;
+                  if ch.is_alphabetic() {
+                      run = if previous == Some(ch) { run + 1 } else { 1 };
+                      longest = longest.max(run);
+                      previous = Some(ch);
+                  } else {
+                      run = 0;
+                      previous = None;
+                  }
+              }
+              (total >= 128 && longest >= 128 && longest as u128 * 10 >= total as u128 * 9)
+                  .then_some((total, longest))
+          }
+          
+          const PRODUCER: &str = "dev.koharu.pipeline.ocr";''', 'extreme OCR classifier')
+          text = replace_once(text, r'''        results.extend(inferred);
+          
+                  let generation = generation(PRODUCER, model_name)?;''', r'''        results.extend(inferred);
+          
+                  // Preserve raw cache entries; only the effective source text is quarantined.
+                  anyhow::ensure!(model_name == "paddleocr-vl-1.6", "consolidated profile requires PaddleOCR");
+                  for result in &mut results {
+                      if let Some((total, longest)) = extreme_ocr_repetition(&result.text) {
+                          tracing::warn!(%page, region = %result.region, total, longest,
+                              "quarantined extreme OCR repetition; raw reading preserved");
+                          result.text.clear();
+                      }
+                  }
+          
+                  let generation = generation(PRODUCER, model_name)?;''', 'quarantine after cache write')
+          path.write_text(text, encoding="utf-8", newline="\n")
+          
+          path = Path('crates/koharu-pipeline/src/stages/translation.rs')
+          text = path.read_text(encoding="utf-8")
+          text = replace_once(text, 'pub(super) struct Processor {', r'''/// match whole alphanumeric tokens, ignoring case and punctuation.
+          fn lexical_tokens(text: &str) -> Vec<String> {
+              text.split(|c: char| !c.is_alphanumeric())
+                  .filter(|part| !part.is_empty())
+                  .map(|part| part.to_lowercase())
+                  .collect()
+          }
+          
+          fn lexical_source_present(source: &str, chapter: &[Vec<String>]) -> bool {
+              let needle = lexical_tokens(source);
+              if needle.is_empty() || source.chars().filter(|c| c.is_alphabetic()).count() < 2 {
+                  return false;
+              }
+              chapter.iter().any(|line| line.windows(needle.len()).any(|window| window == needle.as_slice()))
+          }
+          
+          fn lexical_profile(mut profile: TranslationProfile, segments: &[String]) -> TranslationProfile {
+              let chapter: Vec<Vec<String>> = segments.iter().map(|text| lexical_tokens(text)).collect();
+              profile.series = None;
+              profile.synopsis = None;
+              profile.register = None;
+              profile.characters.retain_mut(|term| {
+                  term.note = None;
+                  !term.target.trim().is_empty() && lexical_source_present(&term.source, &chapter)
+              });
+              profile.glossary.retain_mut(|term| {
+                  term.note = None;
+                  !term.target.trim().is_empty() && lexical_source_present(&term.source, &chapter)
+              });
+              profile
+          }
+          
+          pub(super) struct Processor {''', 'lexical filter')
+          text = replace_once(text, r'''        let mut source_language = None;
+          ''', r'''        let source_language = Some(koharu_translator::Language::English);
+          ''', 'English source')
+          text = replace_once(text, r'''                    source_language = source_language.or_else(|| {
+                                  source
+                                      .language
+                                      .as_ref()
+                                      .and_then(|tag| tag.as_str().parse().ok())
+                              });
+          ''', '', 'no OCR language guessing')
+          text = replace_once(text, r'''        let (profile, learned) = self
+                      .document_profile(&input.scene, source_language, &input.glossary)
+                      .await?;''', r'''        anyhow::ensure!(self.config.target_language.tag() == "fr-FR" && input.glossary.is_empty(),
+                      "consolidated lexical profile requires French target and no fixed glossary");
+                  let (profile, learned) = self
+                      .document_profile(&input.scene, source_language, &input.glossary)
+                      .await?;
+                  let segments = chapter_segments(&input.scene)?;
+                  let profile = profile.map(|p| lexical_profile(p, &segments)).filter(|p| !p.is_empty());''', 'lexical-only request, profile generation and persistence unchanged')
+          path.write_text(text, encoding="utf-8", newline="\n")
+          
+          path = Path('crates/koharu-pipeline/src/batch/run.rs')
+          text = path.read_text(encoding="utf-8")
+          text = replace_once(text, '    let measurements = if arguments.no_calibration {', r'''    // This dedicated batch variant is deliberately restricted to the audited EN -> FR preset.
+              // Reject incompatible requests before runtime/store initialization; no remote translation provider.
+              anyhow::ensure!(arguments.provider == Provider::Local && arguments.lang.tag() == "fr-FR",
+                  "consolidated EN-FR build requires local provider and fr-FR target");
+              anyhow::ensure!(matches!(arguments.ocr, cli::OcrChoice::PaddleOcrVl1_6)
+                  && matches!(arguments.inpainting, cli::InpaintingChoice::LaMa)
+                  && arguments.glossary.is_empty(), "consolidated build requires PaddleOCR, LaMa and no fixed glossary");
+              let expected_quant = match arguments.llm.as_str() {
+                  "hy-mt2-7b" => "Q4_K_M",
+                  "gemma4-12b-it" => "Q4_K_XL",
+                  _ => bail!("consolidated build accepts only hy-mt2-7b or gemma4-12b-it"),
+              };
+              anyhow::ensure!(arguments.quantization.as_deref().is_none_or(|q| q == expected_quant),
+                  "quantization incompatible with consolidated preset");
+              arguments.quantization = Some(expected_quant.to_owned());
+              const INSTRUCTIONS: &str = "Translate each numbered segment independently. Keep sentence fragments in their own segment, even when the sentence continues in the next segment. Never move words or meaning between segment IDs. Do not invent a reaction to fill an ID. Context and the profile may only clarify meaning; the current source segment always takes priority.";
+              anyhow::ensure!(arguments.translation_instructions.as_deref().is_none_or(|s| s == INSTRUCTIONS),
+                  "custom instructions are not part of the consolidated preset");
+              anyhow::ensure!(arguments.retries == 1, "consolidated preset requires one retry");
+              arguments.translation_instructions = Some(INSTRUCTIONS.to_owned());
+              arguments.deterministic = true;
+              arguments.no_vision = true;
+              arguments.no_calibration = true;
+              if arguments.report.is_none() {
+                  arguments.report = Some("none".to_owned());
+              }
+              tracing::info!(preset = "en-fr-consolidated-v1", model = %arguments.llm,
+                  "using consolidated translation preset");
+              let measurements = if arguments.no_calibration {''', 'dedicated batch preset')
+          path.write_text(text, encoding="utf-8", newline="\n")
+          
+          print("Consolidated EN-FR patch applied to exactly four source files")
+          PRIVACY_EXPECTED = {'crates/koharu-runtime/src/store.rs': '741396BB4C85D6E3F4F5E5CAD40147778EB45F528EA713065D4B63433DDC969B', 'crates/koharu-runtime/src/network.rs': '58B6ADABC6F4E9A68BBD8BAEBFB7E5B8991F1ECCD34674EE5FCEC047F53F98F4', 'crates/koharu-runtime/src/source/hugging_face.rs': 'E555B045D112126EE8BD54C18C060BEA27B705A8FCE7E6A8626F385F2A59DE97', 'crates/koharu-runtime/src/runtime/packages/cuda.rs': 'D04015112E9AF34D7AAB359B79C6EC21A7CED540F431C06D52663D7E73EEA563', 'crates/koharu-runtime/src/runtime/packages/torch.rs': '2080392B0FE6F9184D97FBD702CB4DFF341B3DED174C9ECF544311D60B699CB7', 'crates/koharu-runtime/src/runtime/packages/llama.rs': 'EC977DC2108FC82874894485CBA5BECCD79AD9A10E09DCE54E3E414C4CBEBE9F', 'crates/koharu-runtime/src/runtime/packages/diffusion.rs': '66CCF73511C60BE8CCD49C73061C25810A52BF8733F3967FB6FA7BB93B3EF635', 'crates/koharu-translator/src/lib.rs': 'ABF3596260E3B30FFCF77353E9195279D537BA7DC1BBD1E2F8E17D952E9BC53C', 'crates/koharu-pipeline/src/batch/run.rs': '9725667F4D8ECD6FA987773B860142A0CBDC3661CA0E54600115371225BB6822'}
+          for name, expected in PRIVACY_EXPECTED.items():
+              actual = hashlib.sha256(Path(name).read_bytes().replace(b"\r\n", b"\n")).hexdigest().upper()
+              if actual != expected:
+                  raise SystemExit(f"FATAL: unexpected privacy patch input: {name}: {actual}")
+          
+          # Privacy candidate: local resource policy, independent from translation tuning.
+          
+          path = Path('crates/koharu-runtime/src/store.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, 'static ROOT: OnceLock<PathBuf> = OnceLock::new();', 'static ROOT: OnceLock<PathBuf> = OnceLock::new();\n// Set only after an exact, local, SHA-256 verified store inventory succeeds.\nstatic LOCAL_FILES: OnceLock<std::collections::HashMap<PathBuf, u64>> = OnceLock::new();\n\nfn plain_metadata(path: &Path) -> Result<std::fs::Metadata> {\n    let metadata = std::fs::symlink_metadata(path)\n        .with_context(|| format!("cannot inspect local resource {}", path.display()))?;\n    ensure!(!metadata.file_type().is_symlink(), "symbolic link in local store: {}", path.display());\n    #[cfg(windows)]\n    {\n        use std::os::windows::fs::MetadataExt;\n        ensure!(metadata.file_attributes() & 0x400 == 0,\n            "reparse point in local store: {}", path.display());\n    }\n    Ok(metadata)\n}\n\nfn privacy_relative(path: &Path) -> bool {\n    !path.as_os_str().is_empty() && path.components().all(|part| {\n        match part {\n            std::path::Component::Normal(name) => name.to_str().is_some_and(|name|\n                !name.is_empty() && !name.contains([\':\', \'\\\\\', \'/\']) &&\n                !name.ends_with([\'.\', \' \']) && !name.chars().any(char::is_control)),\n            _ => false,\n        }\n    })\n}\n\nasync fn verify_local_tree(root: &Path, entries: Vec<(PathBuf, u64, String)>)\n    -> Result<std::collections::HashMap<PathBuf, u64>>\n{\n    ensure!(root.is_absolute() && !entries.is_empty(), "absolute store and nonempty manifest required");\n    #[cfg(windows)]\n    ensure!(matches!(root.components().next(), Some(std::path::Component::Prefix(p))\n        if matches!(p.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_))),\n        "privacy store must use a local drive path");\n    for ancestor in root.ancestors() {\n        ensure!(plain_metadata(ancestor)?.is_dir(), "invalid store ancestor: {}", ancestor.display());\n    }\n    let mut expected = std::collections::HashMap::new();\n    for (relative, size, hash) in entries {\n        ensure!(privacy_relative(&relative), "invalid manifest resource path: {}", relative.display());\n        ensure!(hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()), "invalid manifest SHA-256");\n        ensure!(expected.insert(relative, (size, hash)).is_none(), "duplicate manifest path");\n    }\n    // Walk without following links; reject junctions and unexpected files as encountered.\n    let mut verified = std::collections::HashMap::new();\n    let mut pending = vec![root.to_path_buf()];\n    while let Some(directory) = pending.pop() {\n        for entry in std::fs::read_dir(&directory)? {\n            let path = entry?.path();\n            let metadata = plain_metadata(&path)?;\n            if metadata.is_dir() {\n                pending.push(path);\n            } else {\n                ensure!(metadata.is_file(), "unsupported local resource: {}", path.display());\n                let relative = path.strip_prefix(root)?;\n                let (size, hash) = expected.remove(relative)\n                    .with_context(|| format!("unlisted local resource {}", relative.display()))?;\n                verify_artifact(&path, &FileExpectation { size: Some(size), sha256: Some(hash.to_ascii_lowercase()) }).await\n                    .with_context(|| format!("local resource integrity failure: {}", relative.display()))?;\n                verified.insert(relative.to_path_buf(), size);\n            }\n        }\n    }\n    ensure!(expected.is_empty(), "missing local resources: {:?}", expected.keys().collect::<Vec<_>>());\n    Ok(verified)\n}', 'local tree verifier')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-runtime/src/store.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, 'impl Store {', 'impl Store {\n    /// Activates the immutable, local-only policy before runtime initialization.\n    pub async fn enable_local_only(entries: Vec<(PathBuf, u64, String)>) -> Result<()> {\n        ensure!(ROOT.get().is_some(), "configure store before enabling local-only mode");\n        ensure!(LOCAL_FILES.get().is_none(), "local-only policy already configured");\n        let files = verify_local_tree(Self::root(), entries).await?;\n        let count = files.len();\n        LOCAL_FILES.set(files).map_err(|_| anyhow::anyhow!("local-only policy already configured"))?;\n        tracing::info!(files = count, "privacy local store SHA-256 verification complete");\n        Ok(())\n    }\n\n    #[must_use]\n    pub fn local_only() -> bool {\n        LOCAL_FILES.get().is_some()\n    }\n\n    pub(crate) fn local_file(path: PathBuf) -> Result<PathBuf> {\n        let files = LOCAL_FILES.get().context("local-only policy not initialized")?;\n        let relative = path.strip_prefix(Self::root())?;\n        let size = files.get(relative).context("resource absent from verified local manifest")?;\n        for ancestor in path.ancestors() {\n            plain_metadata(ancestor)?;\n        }\n        let metadata = plain_metadata(&path)?;\n        ensure!(metadata.is_file() && metadata.len() == *size,\n            "verified local resource is missing or changed: {}", path.display());\n        Ok(path)\n    }\n\n    pub(crate) fn local_directory(target: PathBuf, valid: impl FnOnce(&Path) -> bool) -> Result<PathBuf> {\n        let files = LOCAL_FILES.get().context("local-only policy not initialized")?;\n        let relative = target.strip_prefix(Self::root())?;\n        ensure!(files.keys().any(|path| path.starts_with(relative)),\n            "runtime absent from verified local manifest: {}", target.display());\n        for ancestor in target.ancestors() {\n            ensure!(plain_metadata(ancestor)?.is_dir(), "invalid local runtime directory");\n        }\n        ensure!(valid(&target), "incomplete local runtime: {}", target.display());\n        Ok(target)\n    }\n', 'local store policy API')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-runtime/src/store.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        if valid(&target) {\n            return Ok(target);\n        }\n\n        let _guard = Lock::acquire(&target).await?;', '        if Self::local_only() {\n            return Self::local_directory(target, valid);\n        }\n        if valid(&target) {\n            return Ok(target);\n        }\n\n        let _guard = Lock::acquire(&target).await?;', 'forbid directory repairs')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-runtime/src/store.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        if expected.satisfied_by_size(&target) {\n            return Ok(target);\n        }\n\n        let _guard = Lock::acquire(&target).await?;', '        if Self::local_only() {\n            return Self::local_file(target);\n        }\n        if expected.satisfied_by_size(&target) {\n            return Ok(target);\n        }\n\n        let _guard = Lock::acquire(&target).await?;', 'forbid file downloads and repairs')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-runtime/src/store.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '    use super::*;\n', '    use super::*;\n\n    #[tokio::test]\n    async fn privacy_exact_tree_accepts_verified_bytes() {\n        let root = tempfile::tempdir().unwrap();\n        let dir = root.path().canonicalize().unwrap();\n        std::fs::write(dir.join("model.bin"), b"abc").unwrap();\n        let hash = sha256_hex(&dir.join("model.bin")).await.unwrap();\n        let files = verify_local_tree(&dir, vec![(PathBuf::from("model.bin"), 3, hash)]).await.unwrap();\n        assert_eq!(files.len(), 1);\n    }\n\n    #[tokio::test]\n    async fn privacy_rejects_changed_missing_and_extra_files() {\n        let root = tempfile::tempdir().unwrap();\n        let dir = root.path().canonicalize().unwrap();\n        let path = dir.join("model.bin");\n        std::fs::write(&path, b"abc").unwrap();\n        let hash = sha256_hex(&path).await.unwrap();\n        let manifest = vec![(PathBuf::from("model.bin"), 3, hash)];\n        std::fs::write(&path, b"abd").unwrap();\n        assert!(verify_local_tree(&dir, manifest.clone()).await.is_err());\n        std::fs::remove_file(&path).unwrap();\n        assert!(verify_local_tree(&dir, manifest.clone()).await.is_err());\n        std::fs::write(&path, b"abc").unwrap();\n        std::fs::write(dir.join("extra.bin"), b"x").unwrap();\n        assert!(verify_local_tree(&dir, manifest).await.is_err());\n    }\n\n    #[tokio::test]\n    async fn privacy_policy_blocks_http_and_store_repairs() {\n        // Store policy is process-wide; isolate this test from other store tests.\n        const CHILD: &str = "KOHARU_PRIVACY_UNIT_TEST_CHILD";\n        if std::env::var_os(CHILD).is_none() {\n            let output = std::process::Command::new(std::env::current_exe().unwrap())\n                .args(["--exact", "store::tests::privacy_policy_blocks_http_and_store_repairs", "--nocapture"])\n                .env(CHILD, "1")\n                .output().unwrap();\n            assert!(output.status.success(), "child failed: {}", String::from_utf8_lossy(&output.stderr));\n            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "isolated test did not run");\n            return;\n        }\n        let root = tempfile::tempdir().unwrap();\n        let dir = root.path().canonicalize().unwrap();\n        let relative = PathBuf::from("runtime/ready.bin");\n        std::fs::create_dir(dir.join("runtime")).unwrap();\n        std::fs::write(dir.join(&relative), b"abc").unwrap();\n        let hash = sha256_hex(&dir.join(&relative)).await.unwrap();\n        Store::configure(dir.clone()).unwrap();\n        Store::enable_local_only(vec![(relative.clone(), 3, hash)]).await.unwrap();\n        assert!(crate::network::http().is_err());\n        assert_eq!(Store::local_file(dir.join(&relative)).unwrap(), dir.join(&relative));\n        let missing = dir.join("missing.bin");\n        let result = Store::file(missing.clone(), FileExpectation::default(), |_| async {\n            panic!("privacy must never execute file installer");\n            #[allow(unreachable_code)]\n            Ok(())\n        }).await;\n        assert!(result.is_err());\n        assert!(!missing.exists());\n        let incomplete = dir.join("runtime");\n        let result = Store::directory(incomplete.clone(), FileExpectation::default(), |_| false,\n            |_, _| async {\n                panic!("privacy must never execute directory installer");\n                #[allow(unreachable_code)]\n                Ok(())\n            }).await;\n        assert!(result.is_err());\n        assert_eq!(std::fs::read(dir.join(&relative)).unwrap().as_slice(), b"abc");\n    }\n\n    #[test]\n    fn privacy_rejects_unsafe_manifest_paths() {\n        assert!(privacy_relative(Path::new("model.bin")));\n        assert!(!privacy_relative(Path::new("../model.bin")));\n        assert!(!privacy_relative(Path::new("model.bin:stream")));\n        assert!(!privacy_relative(Path::new("")));\n    }\n', 'integrity unit tests')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-runtime/src/network.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, 'pub(crate) fn http() -> Result<Client> {', 'pub(crate) fn http() -> Result<Client> {\n    anyhow::ensure!(!crate::Store::local_only(), "network access forbidden in privacy translation mode");', 'shared HTTP client guard')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-runtime/src/source/hugging_face.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        let expected = self.expectation().await;', '        if Store::local_only() {\n            return Store::local_file(self.path());\n        }\n        let expected = self.expectation().await;', 'local HF models and fonts')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-runtime/src/runtime/packages/cuda.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        let resolved = wheel(project, Platform::host()?).await?;', '        if Store::local_only() {\n            return Store::local_directory(target, |path| self.library_paths(path).is_ok());\n        }\n        let resolved = wheel(project, Platform::host()?).await?;', 'cuda local-first before metadata')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-runtime/src/runtime/packages/torch.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        let asset = self.asset()?;', '        if Store::local_only() {\n            return Store::local_directory(path, |path| self.complete(path));\n        }\n        let asset = self.asset()?;', 'torch local-first before metadata')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-runtime/src/runtime/packages/llama.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        let asset = self.asset();', '        if Store::local_only() {\n            return Store::local_directory(target, |path| self.complete(path));\n        }\n        let asset = self.asset();', 'llama local-first before metadata')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-runtime/src/runtime/packages/diffusion.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        let asset = self.asset();', '        if Store::local_only() {\n            return Store::local_directory(target, |path| self.complete(path));\n        }\n        let asset = self.asset();', 'diffusion local-first before metadata')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-translator/src/lib.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '    client: reqwest::Client,', '    client: Option<reqwest::Client>,', 'no eager HTTP client in privacy')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-translator/src/lib.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '            client: koharu_runtime::http_client()?,', '            client: if koharu_runtime::Store::local_only() {\n                None\n            } else {\n                Some(koharu_runtime::http_client()?)\n            },', 'skip remote client construction')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-translator/src/lib.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '            let providers = self.providers.read()?.clone();\n            remote::translate(&self.client, &providers, selection, generation, request).await', '            let client = self.client.as_ref()\n                .ok_or_else(|| anyhow::anyhow!("remote translation forbidden in privacy mode"))?;\n            let providers = self.providers.read()?.clone();\n            remote::translate(client, &providers, selection, generation, request).await', 'remote defense in depth')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-translator/src/lib.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '    pub async fn models() -> anyhow::Result<Vec<Model>> {', '    pub async fn models() -> anyhow::Result<Vec<Model>> {\n        if koharu_runtime::Store::local_only() {\n            return Ok(local::models());\n        }', 'disable remote model discovery')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-pipeline/src/batch/run.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, 'use super::{bootstrap, calibration, cbz, pages, prune, report};', 'use super::{calibration, cbz, pages, prune, report};', 'remove infinite retry import')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-pipeline/src/batch/run.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, 'pub async fn run(mut arguments: Arguments) -> Result<i32> {', '// Read the portable resource manifest locally, never from a remote provider.\n// Only the manifest rows are consumed; no source or destination paths are uploaded.\nfn privacy_manifest() -> Result<Vec<(PathBuf, u64, String)>> {\n    let manifest = std::env::var_os("KOHARU_PRIVACY_MANIFEST")\n        .map(PathBuf::from).context("KOHARU_PRIVACY_MANIFEST must point to the verified local manifest")?;\n    anyhow::ensure!(manifest.is_absolute(), "privacy manifest path must be absolute");\n    #[cfg(windows)]\n    anyhow::ensure!(matches!(manifest.components().next(), Some(std::path::Component::Prefix(p))\n        if matches!(p.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_))),\n        "privacy manifest must use a local drive path");\n    let raw = fs::read_to_string(&manifest).context("cannot read local privacy manifest")?;\n    let document: Value = serde_json::from_str(raw.trim_start_matches(\'\\u{feff}\'))?;\n    anyhow::ensure!(document["schema"] == "koharu-migration-v1", "invalid privacy manifest schema");\n    let rows = document["manifest"].as_array().context("missing local resource manifest")?;\n    anyhow::ensure!(!rows.is_empty(), "empty local resource manifest");\n    rows.iter().map(|row| {\n        anyhow::ensure!(row["verified"] == true, "unverified resource in manifest");\n        let relative = row["relative_path"].as_str().context("missing relative path")?;\n        let size = row["size_bytes"].as_u64().context("invalid resource size")?;\n        let sha = row["sha256"].as_str().context("missing resource SHA-256")?;\n        Ok((PathBuf::from(relative), size, sha.to_owned()))\n    }).collect()\n}\n\npub async fn run(mut arguments: Arguments) -> Result<i32> {', 'local manifest parsing')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-pipeline/src/batch/run.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '    if let Some(command) = arguments.command.take() {\n        return run_subcommand(command, &arguments, calibration_path.as_deref());\n    }', '    if let Some(command) = arguments.command.take() {\n        anyhow::ensure!(matches!(&command, Command::Models), "privacy build does not perform maintenance; use separate maintenance tools");\n        return run_subcommand(command, &arguments, calibration_path.as_deref());\n    }', 'no maintenance mutations')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-pipeline/src/batch/run.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '    tracing::info!(preset = "en-fr-consolidated-v1", model = %arguments.llm,\n        "using consolidated translation preset");', '    tracing::info!(preset = "en-fr-consolidated-v2-privacy", model = %arguments.llm,\n        "using consolidated translation preset");', 'candidate log identity')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-pipeline/src/batch/run.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '    // Classification first: the plan lines (and the rule behind them) are', '    // Fail closed before model/device initialization or reading manga pages.\n    // Verify the whole store once per process, including runtime DLLs and fonts.\n    koharu_runtime::Store::enable_local_only(privacy_manifest()?).await?;\n\n    // Classification first: the plan lines (and the rule behind them) are', 'activate verified local policy')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-pipeline/src/batch/run.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '    bootstrap::initialize_with_retry().await;', '    // Missing local dependencies are not repaired or retried indefinitely.\n    koharu_ml::init().await.context("privacy runtime initialization failed")?;', 'fail fast on missing runtime')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-pipeline/src/batch/run.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        // The replay must translate exactly like the first pass: a hosted\n        // run reads the same provider configuration (endpoint, key) there.\n        ProvidersConfig::load()?,', '        // No remote provider configuration or secrets are needed for local replay.\n        Config::memory(ProvidersConfig::default()),', 'local replay provider config')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          path = Path('crates/koharu-pipeline/src/batch/run.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, "        // The app's provider configuration (endpoints, base URLs): hosted\n        // runs read the same file the app wrote; keys come from the keyring.\n        ProvidersConfig::load()?,", '        // No persisted remote provider configuration is needed in privacy mode.\n        Config::memory(ProvidersConfig::default()),', 'local provider config only')
+          path.write_text(text, encoding='utf-8', newline='\n')
+          
+          print("Privacy local-only patch applied")
+          '@
+          $patchScript = Join-Path $env:RUNNER_TEMP 'apply_koharu_consolidated.py'
+          [System.IO.File]::WriteAllText($patchScript, $patch, [System.Text.UTF8Encoding]::new($false))
+          python $patchScript
+          if ($LASTEXITCODE -ne 0) { throw 'Source consolidation patch failed' }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid source diff' }
+          $changes = @((git diff --name-only) | Where-Object { $_ -ne '' })
+          $expectedChanges = @(
+              'crates/koharu-pipeline/src/batch/run.rs',
+              'crates/koharu-pipeline/src/stages/detection.rs',
+              'crates/koharu-pipeline/src/stages/ocr.rs',
+              'crates/koharu-pipeline/src/stages/translation.rs',
+              'crates/koharu-runtime/src/network.rs',
+              'crates/koharu-runtime/src/runtime/packages/cuda.rs',
+              'crates/koharu-runtime/src/runtime/packages/diffusion.rs',
+              'crates/koharu-runtime/src/runtime/packages/llama.rs',
+              'crates/koharu-runtime/src/runtime/packages/torch.rs',
+              'crates/koharu-runtime/src/source/hugging_face.rs',
+              'crates/koharu-runtime/src/store.rs',
+              'crates/koharu-translator/src/lib.rs'
+          )
+          if ($changes.Count -ne 12 -or (@($changes | Where-Object { $_ -notin $expectedChanges })).Count -ne 0) {
+            throw "Unexpected changed files: $($changes -join ', ')"
+          }
+          git diff --stat
+          Write-Host 'Consolidation and privacy patches verified in temporary runner'
+
+      - name: Test local resource integrity policy
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cargo test --release --locked -p koharu-runtime --lib privacy_
+
+      - name: Build a separate privacy executable
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cargo build --release --locked -p koharu-pipeline --bin koharu-batch
+
+      - name: Hash privacy executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'target/release/koharu-batch.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Consolidated EXE missing' }
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          Write-Host "KOHARU_EN_FR_PRIVACY_SHA256=$hash"
+          "$hash  koharu-batch.exe" | Set-Content -Path 'target/release/koharu-batch-en-fr-consolidated-v2-privacy-sha256.txt' -Encoding ascii
+
+      - name: Upload ONLY consolidated binary + hash (no user images)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: koharu-batch-v0.89.0-en-fr-consolidated-v2-privacy
+          path: |
+            target/release/koharu-batch.exe
+            target/release/koharu-batch-en-fr-consolidated-v2-privacy-sha256.txt
+          if-no-files-found: error
+          retention-days: 7
