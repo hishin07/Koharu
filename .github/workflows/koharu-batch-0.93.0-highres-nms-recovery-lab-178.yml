@@ -1,0 +1,908 @@
+name: KoharuBatch 0.93.0 - HighRes NMS Recovery Lab 178
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Set checkout line endings
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - name: Checkout pinned public source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: Endymi0n74/KoharuBatch
+          ref: 35505f9969f6703b0d90db36a384ed062fc3bdcb
+          persist-credentials: false
+      - name: Verify and apply audited laboratory changes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = '35505f9969f6703b0d90db36a384ed062fc3bdcb'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) { throw 'Unexpected source commit' }
+          $verify = @'
+          from pathlib import Path
+          import hashlib, sys
+          before = {'crates/koharu-batch/src/main.rs': '2fcd2cc4cf32785f8deda76d9c605cea685c367ef65227c59fb4de36c419eb3d', 'crates/koharu-batch/src/run.rs': '3e3645324f722ff20ebca4a3f04c95d670e260d2b62ab050cd63b5c836ccdebf', 'crates/koharu-pipeline/src/stages/recognize/mod.rs': 'cab5a76c22cece197a64830addfe44b5d5c50c67763cf31c904fa13773ff6541', 'crates/koharu-runtime/src/huggingface.rs': 'd76657091efc33b9aacdad6e1f2f8992710a142e31121af85f883572456bc72b', 'crates/koharu-runtime/src/lib.rs': '83992ab797391e60173d8e95588134dbc21833543af5b827f7c3361ef477423b', 'crates/koharu-runtime/src/packages/mod.rs': 'fe2cd5a4670f3926881900b7e9a46c68c4f342f919c7784d53fb9d560cf2f3e8', 'crates/koharu-runtime/src/store/mod.rs': 'c55fbb16d1d423655245d0fca138614da9dfd7ca92ac7ba0f24b74a5fc638849', 'crates/koharu-runtime/src/transfer/mod.rs': '4c30b3a1793fa0b3187e2160e21a6597409cef1591529fe8a22413f00d5938a0', 'crates/koharu-ml/src/koharu_layout_highres/suppress.rs': '29e51e7bbe12277c8688eb288a4bf5408add2ad96777e5ada1a9a3abf40dfa4e', 'crates/koharu-ml/src/koharu_layout_highres/mod.rs': 'ff09e157a552ac30676fa778a7936ea9a03d7e7300195d1211a9614f751dbab3', 'crates/koharu-pipeline/src/stages/detect/mod.rs': 'dac53e4ec00d52a2ece76826a9840726553523c8179b312d1526d1c355cd492d'}
+          after = {'crates/koharu-batch/src/main.rs': 'b0c1a7e03a584e2454a8be44a7ad0e991c23369e7e100de8a311198b7c3534f2', 'crates/koharu-batch/src/run.rs': '59c589965c2284c91aa31e3fbd656b1568614a4f2eaa1061c879c058a32003df', 'crates/koharu-pipeline/src/stages/recognize/mod.rs': 'c8ab6d273f151b382344a6fd644e8652b9f74c74d976077d8717b86638bc9bd8', 'crates/koharu-runtime/src/huggingface.rs': '537c31af236e113056aa349f51fa4cd232c80b19925dc15678166dc4b8289bd8', 'crates/koharu-runtime/src/lib.rs': 'a80678e57fe50aa308b094afef9498ddbc0f00ecbe969f37f00c57d17851b2c0', 'crates/koharu-runtime/src/packages/mod.rs': 'ba2052377542cf1afda98beb52141a4bc4ee8b338819628c4b066af650a90619', 'crates/koharu-runtime/src/store/mod.rs': '33260adf43c3e81a437cbb02caf937f42a8c38cc44d99129478753a1a2ccbd85', 'crates/koharu-runtime/src/transfer/mod.rs': '9315b94afba3eac3f498d9c3f188948df6a90b9b2555097982a53700009530bf', 'crates/koharu-ml/src/koharu_layout_highres/suppress.rs': '24a02847090e66e92423c23ed7847b6ca77f6c290ad0c5720d7a27d51f05d46c', 'crates/koharu-ml/src/koharu_layout_highres/mod.rs': 'a8a77dd7c0f24caac2c2ba9a8093b85d95004fbe8f1c5641b3e07f4dd8be91ef', 'crates/koharu-pipeline/src/stages/detect/mod.rs': '092a637f7f1a11866ce1080f85c2b771222c946e6a5ee27b19466177921c9906'}
+          for name, expected in (before if sys.argv[1] == 'before' else after).items():
+              data = Path(name).read_bytes().replace(b"\r\n", b"\n")
+              if hashlib.sha256(data).hexdigest() != expected:
+                  raise SystemExit('Unexpected source file: ' + name)
+          print('Source fingerprints verified:', sys.argv[1])
+          '@
+          $verifyPath = Join-Path $env:RUNNER_TEMP 'lab_verify.py'
+          [IO.File]::WriteAllText($verifyPath, $verify, [Text.UTF8Encoding]::new($false))
+          python $verifyPath before
+          if ($LASTEXITCODE -ne 0) { throw 'Source fingerprints failed' }
+          $patch = @'
+          diff --git a/crates/koharu-batch/src/main.rs b/crates/koharu-batch/src/main.rs
+          index 0a4205b..f8ccf35 100644
+          --- a/crates/koharu-batch/src/main.rs
+          +++ b/crates/koharu-batch/src/main.rs
+          @@ -24,7 +24,6 @@ async fn main() -> Result<()> {
+               let arguments = cli::Arguments::parse();
+               match arguments.command {
+                   Command::Run(run) => run::run(&run).await,
+          -        Command::Report(report) => report::report(&report),
+          -        Command::Prune(prune) => prune::prune(&prune).await,
+          +        Command::Report(_) | Command::Prune(_) => anyhow::bail!("LAB: only the diagnostic run is enabled"),
+               }
+           }
+          diff --git a/crates/koharu-batch/src/run.rs b/crates/koharu-batch/src/run.rs
+          index 3725abf..5847711 100644
+          --- a/crates/koharu-batch/src/run.rs
+          +++ b/crates/koharu-batch/src/run.rs
+          @@ -35,17 +35,22 @@ fn render_page(session: &Session, output_dir: &Path, page_id: PageId, index: usi
+           }
+           
+           pub async fn run(arguments: &Run) -> Result<()> {
+          -    let config = config(arguments)?;
+          +    ensure!(arguments.stages == ["detect", "recognize"], "LAB: require --stages detect,recognize");
+          +    ensure!(!arguments.overwrite && arguments.pages.is_none(), "LAB: new project, all input pages only");
+          +    ensure!(arguments.detector == "koharu-layout-highres" && arguments.ocr == "hayai-ocr", "LAB: fixed detector and OCR");
+               let output_dir = &arguments.output;
+          +    verify_lab(output_dir).await?;
+          +    let config = config(arguments)?;
+          +    let started = std::time::Instant::now();
+               if output_dir.is_file() {
+                   bail!(
+                       "{} is a file, not a folder; pick a folder for the translated images",
+                       output_dir.display()
+                   );
+               }
+          -    if !output_dir.exists() {
+          -        fs_err::create_dir_all(output_dir)?;
+          -    }
+          +    fs_err::create_dir(output_dir)?;
+          +    fs_err::create_dir(output_dir.join("crops"))?;
+          +    fs_err::create_dir(output_dir.join("masks"))?;
+               let (session, resuming) = prepare(arguments, output_dir)?;
+               let pages: Vec<PageId> = session
+                   .lock()
+          @@ -89,14 +94,46 @@ pub async fn run(arguments: &Run) -> Result<()> {
+               } else {
+                   progress.abort();
+               }
+          -    // Export translated pages to the output folder.
+          +    fs_err::write(output_dir.join("events.json"), serde_json::to_vec_pretty(&history)?)?;
+          +    if !matches!(history.last(), Some(Event::Ended { .. })) {
+          +        pipeline.stop();
+          +    }
+          +    report(&history, arguments)?;
+          +    let finished: Vec<_> = history.iter().filter_map(|event| match event {
+          +        Event::Finished { page, stage, .. } => Some((*page, *stage)),
+          +        _ => None,
+          +    }).collect();
+          +    let expected: BTreeSet<_> = pages.iter().flat_map(|page| [(*page, Stage::Detect), (*page, Stage::Recognize)]).collect();
+          +    ensure!(finished.len() == expected.len() && finished.into_iter().collect::<BTreeSet<_>>() == expected,
+          +        "LAB: incomplete or duplicate stage history");
+          +    let elapsed = started.elapsed().as_secs_f64();
+               let session_lock = session.lock();
+               let project = session_lock.project();
+          +    let mut results = Vec::new();
+               for (index, page) in project.pages().enumerate() {
+          -        let page_id = page.id;
+          -        render_page(&session_lock, output_dir, page_id, index)?;
+          +        let mut blocks = Vec::new();
+          +        for (id, block) in project.blocks(page.id)? {
+          +            let tiles = session_lock.tiles(block.mask.id, None)?;
+          +            let mask = if let Some((rect, pixels)) = tiles.coverage(page.size.width, page.size.height) {
+          +                let filename = format!("masks/{id}.png");
+          +                pixels.save(output_dir.join(&filename))?;
+          +                json!({"rect": rect, "file": filename})
+          +            } else { serde_json::Value::Null };
+          +            let filename = format!("crops/{id}.png");
+          +            let crop = output_dir.join(&filename).is_file().then_some(filename);
+          +            let layer = project.layer(id)?;
+          +            let score = layer.attributes.get("koharu").and_then(|v| v.get("detection")).and_then(|v| v.get("score"));
+          +            blocks.push(json!({"id": id, "role": block.role, "source": block.source.content.text(),
+          +                "frame": block.source, "score": score, "mask": mask, "crop": crop}));
+          +        }
+          +        results.push(json!({"index": index + 1, "scene": page, "blocks": blocks}));
+               }
+          -    report(&history, arguments)
+          +    ensure!(results.len() == pages.len(), "LAB: page count mismatch");
+          +    fs_err::write(output_dir.join("diagnostics.json"), serde_json::to_vec_pretty(&json!({
+          +        "schema": "koharu-highres-hayai-lab-v1", "source_commit": "35505f9969f6703b0d90db36a384ed062fc3bdcb",
+          +        "pipeline_seconds_including_import": elapsed, "pages": results
+          +    }))?)?;
+          +    Ok(())
+           }
+           
+           /// The project to work on: the existing output when `--overwrite` resumes it,
+          @@ -477,3 +514,67 @@ mod tests {
+                   assert_eq!(session.lock().project().pages().count(), 0);
+               }
+           }
+          +
+          +// The provisioner creates the dedicated lab layout and its complete manifest.
+          +fn lab_metadata(path: &Path) -> Result<std::fs::Metadata> {
+          +    let metadata = std::fs::symlink_metadata(path)?;
+          +    ensure!(!metadata.file_type().is_symlink(), "LAB: symlink refused: {}", path.display());
+          +    #[cfg(windows)]
+          +    {
+          +        use std::os::windows::fs::MetadataExt;
+          +        ensure!(metadata.file_attributes() & 0x400 == 0, "LAB: reparse point refused: {}", path.display());
+          +    }
+          +    Ok(metadata)
+          +}
+          +
+          +fn lab_files(root: &Path, dir: &Path, files: &mut std::collections::BTreeMap<String, PathBuf>) -> Result<()> {
+          +    for entry in std::fs::read_dir(dir)? {
+          +        let path = entry?.path();
+          +        let metadata = lab_metadata(&path)?;
+          +        if metadata.is_dir() {
+          +            lab_files(root, &path, files)?;
+          +        } else {
+          +            ensure!(metadata.is_file(), "LAB: non-file resource");
+          +            let name = path.strip_prefix(root)?.to_str().context("LAB: non-UTF8 resource path")?.replace('\\', "/");
+          +            ensure!(files.insert(name, path).is_none(), "LAB: duplicate resource");
+          +        }
+          +    }
+          +    Ok(())
+          +}
+          +
+          +async fn verify_lab(output: &Path) -> Result<()> {
+          +    let exe = std::env::current_exe()?;
+          +    let bin = exe.parent().context("LAB: no bin directory")?;
+          +    ensure!(bin.file_name().and_then(|s| s.to_str()) == Some("bin"), "LAB: expected bin directory");
+          +    let lab = bin.parent().context("LAB: no lab directory")?;
+          +    ensure!(lab_metadata(lab)?.is_dir() && lab_metadata(bin)?.is_dir(), "LAB: invalid lab layout");
+          +    let root = lab.join("store");
+          +    ensure!(lab_metadata(&root)?.is_dir(), "LAB: missing dedicated store");
+          +    let store = PathBuf::from(std::env::var_os("KOHARU_STORE").context("LAB: KOHARU_STORE required")?);
+          +    ensure!(store.is_absolute() && store.canonicalize()? == root.canonicalize()?, "LAB: wrong store");
+          +    ensure!(lab_metadata(&store)?.is_dir(), "LAB: invalid store path");
+          +    let jobs = lab.join("jobs");
+          +    ensure!(lab_metadata(&jobs)?.is_dir(), "LAB: missing jobs directory");
+          +    ensure!(output.is_absolute() && output.parent().context("LAB: no output parent")?.canonicalize()? == jobs.canonicalize()?, "LAB: output must be a new direct child of jobs");
+          +    let named_output = PathBuf::from(std::env::var_os("KOHARU_LAB_OUTPUT").context("LAB: KOHARU_LAB_OUTPUT required")?);
+          +    ensure!(named_output == output && !output.exists(), "LAB: output mismatch or already exists");
+          +    let manifest_path = lab.join("store-manifest.json");
+          +    ensure!(lab_metadata(&manifest_path)?.is_file(), "LAB: missing manifest");
+          +    let manifest: serde_json::Value = serde_json::from_slice(&fs_err::read(&manifest_path)?)?;
+          +    ensure!(manifest["schema"] == "koharu-highres-hayai-store-v1", "LAB: wrong manifest schema");
+          +    let entries = manifest["files"].as_array().context("LAB: manifest files missing")?;
+          +    let mut actual = std::collections::BTreeMap::new();
+          +    lab_files(&root, &root, &mut actual)?;
+          +    ensure!(!entries.is_empty() && entries.len() == actual.len(), "LAB: store inventory mismatch");
+          +    for entry in entries {
+          +        let name = entry["relative_path"].as_str().context("LAB: missing path")?;
+          +        let size = entry["size_bytes"].as_u64().context("LAB: missing size")?;
+          +        let sha = entry["sha256"].as_str().context("LAB: missing SHA256")?;
+          +        ensure!(sha.len() == 64 && sha.bytes().all(|c| c.is_ascii_hexdigit()), "LAB: invalid SHA256");
+          +        let path = actual.remove(name).context("LAB: unknown or duplicate manifest path")?;
+          +        koharu_runtime::lab_verify_file(&path, size, sha).await?;
+          +    }
+          +    ensure!(actual.is_empty(), "LAB: unlisted resources");
+          +    println!("LAB: local store verified ({} files)", entries.len());
+          +    Ok(())
+          +}
+          diff --git a/crates/koharu-ml/src/koharu_layout_highres/mod.rs b/crates/koharu-ml/src/koharu_layout_highres/mod.rs
+          index 589dc10..65cec83 100644
+          --- a/crates/koharu-ml/src/koharu_layout_highres/mod.rs
+          +++ b/crates/koharu-ml/src/koharu_layout_highres/mod.rs
+          @@ -110,15 +110,17 @@ impl KoharuLayoutHighres {
+                       self.processor
+                           .postprocess(&output, image.width(), image.height(), thresholds)
+                   })?;
+          +        // Local diagnostic only: after confidence filtering, before NMS.
+          +        let before_nms = detections.clone();
+                   suppress::suppress(&mut detections);
+          -        Ok(Detected(detections))
+          +        Ok(Detected(detections, before_nms))
+               }
+           }
+           
+           /// The network's detections on a page, before the work on the page's pixels
+           /// that turns them into its layout.
+           #[derive(Debug)]
+          -pub struct Detected(Vec<Detection>);
+          +pub struct Detected(Vec<Detection>, Vec<Detection>);
+           
+           impl Detected {
+               /// A digest of the raw detections, before the page's pixels turn them
+          @@ -151,7 +153,7 @@ impl Detected {
+               /// their texts has, and its panels.
+               #[must_use]
+               pub fn layout(self, page: &RgbImage) -> Layout {
+          -        let Self(mut detections) = self;
+          +        let Self(mut detections, _) = self;
+                   // RF-DETR's lettering masks hug each stroke but miss counters and
+                   // parts of strokes. Each lettering's is its own, so they're made in
+                   // parallel.
+          @@ -168,6 +170,130 @@ impl Detected {
+               }
+           }
+           
+          +
+          +/// Laboratory diagnostics: the same network inference and same glyphs go
+          +/// through both mask allocation rules after experimental recovery. The official
+          +/// allocation rule enters downstream layout/OCR; compare against lab 176.
+          +impl Detected {
+          +    pub fn lab_layout(self, page: &RgbImage, folder: &std::path::Path) -> Result<Layout> {
+          +        let Self(mut detections, before_nms) = self;
+          +        std::fs::create_dir(folder)?;
+          +        let after_nms = lab_snapshot(&detections);
+          +        let (selected, recovery) = lab_recover(&before_nms, page, folder)?;
+          +        detections = selected;
+          +        let after_recovery = lab_snapshot(&detections);
+          +        detections
+          +            .par_iter_mut()
+          +            .filter(|detection| matches!(detection.label.as_str(), "text" | "onomatopoeia"))
+          +            .for_each(|detection| {
+          +                detection.mask = measure::glyph_mask(&detection.mask, detection.bbox, page);
+          +            });
+          +        suppress::merge(&mut detections);
+          +        let before_disjoint = lab_snapshot(&detections);
+          +        let mut legacy = detections.clone();
+          +        suppress::disjoint_legacy(&mut legacy);
+          +        suppress::disjoint(&mut detections);
+          +        anyhow::ensure!(legacy.len() == detections.len(), "LAB: unexpected region count change");
+          +        let mut comparisons = Vec::new();
+          +        for (index, (old, new)) in legacy.iter().zip(&detections).enumerate() {
+          +            anyhow::ensure!(old.label == new.label && old.bbox == new.bbox, "LAB: region mismatch");
+          +            let (a, b) = (&old.mask, &new.mask);
+          +            anyhow::ensure!((a.x, a.y, a.width, a.height, a.pixels.len()) ==
+          +                (b.x, b.y, b.width, b.height, b.pixels.len()), "LAB: mask geometry mismatch");
+          +            let added = a.pixels.iter().zip(&b.pixels).filter(|(x, y)| **x == 0 && **y != 0).count();
+          +            let removed = a.pixels.iter().zip(&b.pixels).filter(|(x, y)| **x != 0 && **y == 0).count();
+          +            let changed = a.pixels.iter().zip(&b.pixels).filter(|(x, y)| x != y).count();
+          +            // Save both masks for every changed region; untouched regions are
+          +            // described in the JSON and the pipeline's final exports.
+          +            let mut paths = [None, None];
+          +            if changed != 0 {
+          +                for (slot, (kind, mask)) in [("legacy", a), ("official", b)].into_iter().enumerate() {
+          +                    let filename = format!("{index:03}_{kind}.png");
+          +                    let png = image::GrayImage::from_raw(mask.width, mask.height, mask.pixels.clone())
+          +                        .context("LAB: invalid glyph mask")?;
+          +                    png.save(folder.join(&filename))?;
+          +                    paths[slot] = Some(filename);
+          +                }
+          +            }
+          +            comparisons.push(serde_json::json!({
+          +                "index": index, "label": &new.label, "bbox": new.bbox,
+          +                "mask_rect_xywh": [b.x, b.y, b.width, b.height],
+          +                "legacy_pixels": a.pixels.iter().filter(|v| **v != 0).count(),
+          +                "official_pixels": b.pixels.iter().filter(|v| **v != 0).count(),
+          +                "added_pixels": added, "removed_pixels": removed,
+          +                "changed_values": changed, "legacy_png": &paths[0], "official_png": &paths[1]
+          +            }));
+          +        }
+          +        let trace = serde_json::json!({
+          +            "schema": "koharu-highres-nms-recovery-178-v1",
+          +            "width": page.width(), "height": page.height(),
+          +            "before_nms_after_thresholds": lab_snapshot(&before_nms), "after_nms": after_nms,
+          +            "after_recovery": after_recovery, "recovery": recovery,
+          +            "before_disjoint_after_glyphs_and_sfx_merge": before_disjoint,
+          +            "comparisons": comparisons,
+          +            "pipeline_rule": "conditional-nms-recovery-plus-official-0.98-disjoint"
+          +        });
+          +        std::fs::write(folder.join("trace.json"), serde_json::to_vec_pretty(&trace)?)?;
+          +        order::sort(&mut detections);
+          +        Ok(layout::build(detections, page.width(), page.height()))
+          +    }
+          +}
+          +
+          +
+          +/// Record raw and refined masks for every group, including rejected groups.
+          +/// All output is below the validated local job directory. No page-name rules.
+          +fn lab_recover(raw: &[Detection], page: &RgbImage, folder: &std::path::Path)
+          +    -> Result<(Vec<Detection>, serde_json::Value)> {
+          +    let (mut keep, groups) = suppress::lab_groups(raw);
+          +    let mut records = Vec::new();
+          +    for (parent, children, ambiguous) in groups {
+          +        let mut evidence = Vec::new();
+          +        let mut glyphs = Vec::new();
+          +        for &id in std::iter::once(&parent).chain(children.iter()) {
+          +            let d = &raw[id];
+          +            let glyph = measure::glyph_mask(&d.mask, d.bbox, page);
+          +            let mut masks = Vec::new();
+          +            for (kind, mask) in [("raw", &d.mask), ("glyph", &glyph)] {
+          +                let filename = format!("recovery_{parent:03}_{id:03}_{kind}.png");
+          +                let file = if mask.width > 0 && mask.height > 0 {
+          +                    image::GrayImage::from_raw(mask.width, mask.height, mask.pixels.clone())
+          +                        .context("LAB: invalid recovery mask")?.save(folder.join(&filename))?;
+          +                    Some(filename)
+          +                } else { None };
+          +                masks.push(serde_json::json!({"kind": kind, "file": file,
+          +                    "rect_xywh": [mask.x, mask.y, mask.width, mask.height]}));
+          +            }
+          +            evidence.push(serde_json::json!({"index": id, "masks": masks}));
+          +            glyphs.push(glyph);
+          +        }
+          +        let geometry = children.len() == 2 && suppress::lab_geometry(&raw[parent], &raw[children[0]], &raw[children[1]]);
+          +        let (mask_pass, metrics) = if children.len() == 2 {
+          +            suppress::lab_mask_metrics(&glyphs[0], &glyphs[1], &glyphs[2])
+          +        } else { (false, serde_json::Value::Null) };
+          +        let accepted = !ambiguous && geometry && mask_pass;
+          +        if accepted {
+          +            keep[parent] = false;
+          +            for &child in &children { keep[child] = true; }
+          +        }
+          +        records.push(serde_json::json!({"parent": parent, "children": children,
+          +            "ambiguous_owner_or_cross_group": ambiguous, "geometry_pass": geometry, "mask_pass": mask_pass,
+          +            "metrics": metrics, "accepted": accepted, "evidence": evidence}));
+          +    }
+          +    let selected = raw.iter().zip(keep).filter(|(_, kept)| *kept)
+          +        .map(|(d, _)| d.clone()).collect();
+          +    Ok((selected, serde_json::Value::Array(records)))
+          +}
+          +
+          +fn lab_snapshot(detections: &[Detection]) -> serde_json::Value {
+          +    serde_json::Value::Array(detections.iter().enumerate().map(|(index, d)| {
+          +        serde_json::json!({
+          +            "index": index, "label": &d.label, "score": d.score, "bbox": d.bbox,
+          +            "mask_rect_xywh": [d.mask.x, d.mask.y, d.mask.width, d.mask.height],
+          +            "mask_pixels": d.mask.pixels.iter().filter(|v| **v != 0).count()
+          +        })
+          +    }).collect())
+          +}
+          +
+           #[cfg(test)]
+           mod tests {
+               use std::path::PathBuf;
+          diff --git a/crates/koharu-ml/src/koharu_layout_highres/suppress.rs b/crates/koharu-ml/src/koharu_layout_highres/suppress.rs
+          index 20cda0f..f260e99 100644
+          --- a/crates/koharu-ml/src/koharu_layout_highres/suppress.rs
+          +++ b/crates/koharu-ml/src/koharu_layout_highres/suppress.rs
+          @@ -30,7 +30,7 @@ const SHARED_GLYPHS: f32 = 0.5;
+           /// Drops each detection that duplicates a more confident one, keeping the
+           /// rest in their order. Onomatopoeia are left to `merge`, which needs their
+           /// glyphs.
+          -pub(super) fn suppress(detections: &mut Vec<Detection>) {
+          +fn keep_flags(detections: &[Detection]) -> Vec<bool> {
+               let mut ranked: Vec<usize> = (0..detections.len()).collect();
+               ranked.sort_by(|&left, &right| detections[right].score.total_cmp(&detections[left].score));
+               let mut kept = vec![false; detections.len()];
+          @@ -40,10 +40,88 @@ pub(super) fn suppress(detections: &mut Vec<Detection>) {
+                       .zip(&kept)
+                       .any(|(other, &kept)| kept && duplicate(other, &detections[candidate]));
+               }
+          -    let mut kept = kept.into_iter();
+          +    kept
+          +}
+          +
+          +pub(super) fn suppress(detections: &mut Vec<Detection>) {
+          +    let mut kept = keep_flags(detections).into_iter();
+               detections.retain(|_| kept.next() == Some(true));
+           }
+           
+          +
+          +/// Group suppressed text by every surviving duplicate. Ambiguous ownership is
+          +/// never eligible for replacement. Keep the normal NMS decisions as reference.
+          +pub(super) fn lab_groups(raw: &[Detection]) -> (Vec<bool>, Vec<(usize, Vec<usize>, bool)>) {
+          +    let keep = keep_flags(raw);
+          +    let mut groups = std::collections::BTreeMap::<usize, (Vec<usize>, bool)>::new();
+          +    for (i, d) in raw.iter().enumerate() {
+          +        if keep[i] || d.label != "text" { continue; }
+          +        let owners: Vec<_> = raw.iter().enumerate()
+          +            .filter(|(j, other)| keep[*j] && duplicate(other, d))
+          +            .map(|(j, _)| j).collect();
+          +        for &owner in &owners {
+          +            let entry = groups.entry(owner).or_default();
+          +            entry.0.push(i);
+          +            entry.1 |= owners.len() != 1;
+          +        }
+          +    }
+          +    // If children from different proposed groups duplicate one another,
+          +    // refuse both groups rather than reintroduce a cross-group duplicate.
+          +    let pairs: Vec<_> = groups.iter().map(|(&p, (c, _))| (p, c.clone())).collect();
+          +    for (i, (p, a)) in pairs.iter().enumerate() {
+          +        for (q, b) in &pairs[i + 1..] {
+          +            if a.iter().any(|&x| b.iter().any(|&y| duplicate(&raw[x], &raw[y]))) {
+          +                groups.get_mut(p).expect("existing group").1 = true;
+          +                groups.get_mut(q).expect("existing group").1 = true;
+          +            }
+          +        }
+          +    }
+          +    (keep, groups.into_iter().map(|(p, (c, a))| (p, c, a)).collect())
+          +}
+          +
+          +/// Conservative geometric gate. Not an OCR or a guarantee of complete text.
+          +pub(super) fn lab_geometry(parent: &Detection, a: &Detection, b: &Detection) -> bool {
+          +    let parent_area = area(parent.bbox);
+          +    parent_area > 0.0 && [a, b].into_iter().all(|d| {
+          +        let fraction = area(d.bbox) / parent_area;
+          +        (0.15..=0.65).contains(&fraction) && overlap(parent.bbox, d.bbox).1 >= NESTED
+          +    }) && overlap(a.bbox, b.bbox).1 <= 0.05
+          +}
+          +
+          +fn lab_count(mask: &Mask) -> usize {
+          +    mask.pixels.iter().filter(|&&p| p != 0).count()
+          +}
+          +
+          +fn lab_count_if(mask: &Mask, predicate: impl Fn(u32, u32) -> bool) -> usize {
+          +    // Iteration over the stored mask, not the full page.
+          +    if mask.width == 0 { return 0; }
+          +    mask.pixels.iter().enumerate().filter(|&(i, p)| {
+          +        *p != 0 && predicate(mask.x + i as u32 % mask.width, mask.y + i as u32 / mask.width)
+          +    }).count()
+          +}
+          +
+          +/// Metrics over nonzero pixels in page coordinates, before disjoint allocation.
+          +/// `added` counts the union of both child masks outside the parent's glyph mask.
+          +pub(super) fn lab_mask_metrics(parent: &Mask, a: &Mask, b: &Mask) -> (bool, serde_json::Value) {
+          +    let p = lab_count(parent);
+          +    let ac = lab_count(a);
+          +    let bc = lab_count(b);
+          +    let shared = lab_count_if(a, |x, y| b.contains(x, y));
+          +    let covered = lab_count_if(parent, |x, y| a.contains(x, y) || b.contains(x, y));
+          +    let added = lab_count_if(a, |x, y| !parent.contains(x, y))
+          +        + lab_count_if(b, |x, y| !parent.contains(x, y) && !a.contains(x, y));
+          +    let ratio = |n: usize, d: usize| if d == 0 { 0.0 } else { n as f64 / d as f64 };
+          +    let coverage = ratio(covered, p);
+          +    let extra = ratio(added, p);
+          +    let overlap = ratio(shared, ac.min(bc));
+          +    let pass = p > 0 && ac > 0 && bc > 0 && coverage >= 0.95 && extra <= 0.05 && overlap <= 0.05;
+          +    (pass, serde_json::json!({"parent_pixels": p, "child_a_pixels": ac, "child_b_pixels": bc,
+          +        "covered_parent_pixels": covered, "missing_parent_pixels": p - covered,
+          +        "added_pixels": added, "shared_child_pixels": shared,
+          +        "coverage": coverage, "extra_fraction_of_parent": extra,
+          +        "overlap_fraction_of_smaller_child": overlap}))
+          +}
+          +
+           /// Merges onomatopoeia detected twice into one, as supervision's
+           /// non-maximum merging does: the union of their boxes and of their glyphs,
+           /// with their scores weighted by box area. Keeping the more confident alone
+          @@ -70,7 +148,7 @@ pub(super) fn merge(detections: &mut Vec<Detection>) {
+           /// balloon's text over a remark in its balloon, takes that lettering's glyphs
+           /// in as its own on plain paper; its clean-up, drawn after, would cover the
+           /// smaller lettering's translation.
+          -pub(super) fn disjoint(detections: &mut [Detection]) {
+          +pub(super) fn disjoint_legacy(detections: &mut [Detection]) {
+               let mut lettering: Vec<usize> = (0..detections.len())
+                   .filter(|&at| matches!(detections[at].label.as_str(), "text" | "onomatopoeia"))
+                   .collect();
+          @@ -94,6 +172,54 @@ pub(super) fn disjoint(detections: &mut [Detection]) {
+               }
+           }
+           
+          +/// Gives each glyph pixel two lettering masks share to the lettering whose box
+          +/// is nearer it, and one inside both, to the smaller box. A box reaching over a
+          +/// smaller lettering beside it, as a balloon's text over a remark in its
+          +/// balloon, takes that lettering's glyphs in as its own on plain paper; its
+          +/// clean-up, drawn after, would cover the smaller lettering's translation. And
+          +/// a mask takes in what's in line with its box on its own paper, such as the
+          +/// last glyphs of the text above it in a conjoined balloon.
+          +pub(super) fn disjoint(detections: &mut [Detection]) {
+          +    let mut lettering: Vec<usize> = (0..detections.len())
+          +        .filter(|&at| matches!(detections[at].label.as_str(), "text" | "onomatopoeia"))
+          +        .collect();
+          +    lettering.sort_by(|&left, &right| {
+          +        area(detections[left].bbox).total_cmp(&area(detections[right].bbox))
+          +    });
+          +    for (rank, &small) in lettering.iter().enumerate() {
+          +        let (mut glyphs, bbox) = (detections[small].mask.clone(), detections[small].bbox);
+          +        for &large in &lettering[rank + 1..] {
+          +            let Detection {
+          +                mask, bbox: other, ..
+          +            } = &mut detections[large];
+          +            for (at, value) in mask.pixels.iter_mut().enumerate() {
+          +                let (x, y) = (
+          +                    mask.x + at as u32 % mask.width,
+          +                    mask.y + at as u32 / mask.width,
+          +                );
+          +                if *value == 0 || !glyphs.contains(x, y) {
+          +                    continue;
+          +                }
+          +                if distance(*other, x, y) < distance(bbox, x, y) {
+          +                    let at = (y - glyphs.y) * glyphs.width + x - glyphs.x;
+          +                    glyphs.pixels[at as usize] = 0;
+          +                } else {
+          +                    *value = 0;
+          +                }
+          +            }
+          +        }
+          +        detections[small].mask = glyphs;
+          +    }
+          +}
+          +
+          +/// How far pixel (`x`, `y`)'s centre lies outside `bbox`, squared.
+          +fn distance([left, top, right, bottom]: [f32; 4], x: u32, y: u32) -> f32 {
+          +    let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
+          +    let across = (left - x).max(x - right).max(0.0);
+          +    let down = (top - y).max(y - bottom).max(0.0);
+          +    across * across + down * down
+          +}
+          +
+           /// Merges each onomatopoeia into the first more confident one it
+           /// duplicates.
+           fn merge_pass(mut onomatopoeia: Vec<Detection>) -> Vec<Detection> {
+          @@ -318,4 +444,72 @@ mod tests {
+                   assert!(!page[0].mask.contains(80, 50) && page[0].mask.contains(50, 50));
+                   assert!(page[1].mask.contains(80, 50));
+               }
+          +
+          +    #[test]
+          +    fn a_glyph_stays_with_the_text_whose_box_holds_it() {
+          +        // A text, and a smaller one under it whose mask took in its last
+          +        // glyphs, in line with its own.
+          +        let glyphs = |[x0, y0, x1, y1]: [u32; 4]| Mask {
+          +            x: 0,
+          +            y: 0,
+          +            width: 100,
+          +            height: 100,
+          +            pixels: (0..100)
+          +                .flat_map(|y| (0..100).map(move |x| (x, y)))
+          +                .map(|(x, y)| u8::from((x0..x1).contains(&x) && (y0..y1).contains(&y)) * u8::MAX)
+          +                .collect(),
+          +        };
+          +        let mut page = vec![
+          +            Detection {
+          +                mask: glyphs([10, 5, 40, 58]),
+          +                ..detection("text", 0.9, [10.0, 5.0, 40.0, 55.0])
+          +            },
+          +            Detection {
+          +                mask: glyphs([10, 40, 40, 95]),
+          +                ..detection("text", 0.9, [10.0, 70.0, 40.0, 95.0])
+          +            },
+          +        ];
+          +        disjoint(&mut page);
+          +        // The glyphs in the upper's box, and those past it but nearer it.
+          +        for y in [45, 57] {
+          +            assert!(page[0].mask.contains(20, y) && !page[1].mask.contains(20, y));
+          +        }
+          +        assert!(page[1].mask.contains(20, 60) && page[1].mask.contains(20, 80));
+          +    }
+          +}
+          +
+          +#[cfg(test)]
+          +mod lab_recovery_tests {
+          +    use super::*;
+          +    fn d(score: f32, bbox: [f32; 4]) -> Detection {
+          +        Detection { label: "text".into(), score, bbox,
+          +            mask: Mask { x: 0, y: 0, width: 0, height: 0, pixels: Vec::new() } }
+          +    }
+          +    fn mask(x: u32, width: u32) -> Mask {
+          +        Mask { x, y: 0, width, height: 10, pixels: vec![255; (width * 10) as usize] }
+          +    }
+          +    #[test]
+          +    fn two_complementary_children_are_grouped_without_changing_baseline() {
+          +        let raw = vec![d(0.8, [0.,0.,100.,100.]), d(0.4, [0.,0.,45.,100.]), d(0.3, [55.,0.,100.,100.])];
+          +        let (keep, groups) = lab_groups(&raw);
+          +        assert_eq!(keep, vec![true,false,false]);
+          +        assert_eq!(groups, vec![(0,vec![1,2],false)]);
+          +        assert!(lab_geometry(&raw[0],&raw[1],&raw[2]));
+          +        let mut baseline = raw.clone(); suppress(&mut baseline); assert_eq!(baseline.len(),1);
+          +    }
+          +    #[test]
+          +    fn single_duplicate_and_overlapping_fragments_are_not_complementary() {
+          +        let raw = vec![d(0.8,[0.,0.,100.,100.]),d(0.4,[5.,5.,95.,95.])];
+          +        assert_eq!(lab_groups(&raw).1,vec![(0,vec![1],false)]);
+          +        assert!(!lab_geometry(&raw[0],&d(0.4,[0.,0.,60.,100.]),&d(0.3,[40.,0.,100.,100.])));
+          +    }
+          +    #[test]
+          +    fn masks_must_preserve_coverage_without_new_ink_or_duplicates() {
+          +        let parent = mask(0,100);
+          +        assert!(lab_mask_metrics(&parent,&mask(0,50),&mask(50,50)).0);
+          +        assert!(!lab_mask_metrics(&parent,&mask(0,40),&mask(50,50)).0);
+          +        assert!(!lab_mask_metrics(&parent,&mask(0,50),&mask(50,60)).0);
+          +        assert!(!lab_mask_metrics(&parent,&mask(0,60),&mask(40,60)).0);
+          +        assert!(!lab_mask_metrics(&parent,&mask(0,0),&mask(0,100)).0);
+          +    }
+           }
+          diff --git a/crates/koharu-pipeline/src/stages/detect/mod.rs b/crates/koharu-pipeline/src/stages/detect/mod.rs
+          index 9911a6c..aea47ec 100644
+          --- a/crates/koharu-pipeline/src/stages/detect/mod.rs
+          +++ b/crates/koharu-pipeline/src/stages/detect/mod.rs
+          @@ -78,11 +78,16 @@ pub(crate) async fn detect(task: &Task, config: &PipelineConfig) -> anyhow::Resu
+                   tracing::info!("DETHASH page={page} {:016x}", detected.patch_hash());
+               }
+               let name = config.model.to_string();
+          +    let output = std::path::PathBuf::from(std::env::var_os("KOHARU_LAB_OUTPUT")
+          +        .ok_or_else(|| anyhow::anyhow!("LAB: missing trace output"))?);
+          +    let trace_root = output.join("highres-trace");
+          +    std::fs::create_dir_all(&trace_root)?;
+          +    let trace_folder = trace_root.join(format!("{page}"));
+               let additions = tokio::task::spawn_blocking(move || {
+                   let pixels = scan.to_rgb8();
+                   let layout = {
+                       let _span = tracing::info_span!("layout").entered();
+          -            detected.layout(&pixels)
+          +            detected.lab_layout(&pixels, &trace_folder)?
+                   };
+                   let _span = tracing::info_span!("typography").entered();
+                   let typography: Vec<Option<Typography>> = layout
+          diff --git a/crates/koharu-pipeline/src/stages/recognize/mod.rs b/crates/koharu-pipeline/src/stages/recognize/mod.rs
+          index 3d2dd8b..44911d1 100644
+          --- a/crates/koharu-pipeline/src/stages/recognize/mod.rs
+          +++ b/crates/koharu-pipeline/src/stages/recognize/mod.rs
+          @@ -129,6 +129,13 @@ fn crops(member: &Member) -> anyhow::Result<Option<Vec<(LayerId, DynamicImage)>>
+                       Some((id, DynamicImage::ImageRgb8(crop)))
+                   })
+                   .collect();
+          +    let output = std::path::PathBuf::from(std::env::var_os("KOHARU_LAB_OUTPUT")
+          +        .ok_or_else(|| anyhow::anyhow!("LAB: missing crop output"))?);
+          +    for (id, crop) in &crops {
+          +        let path = output.join("crops").join(format!("{id}.png"));
+          +        anyhow::ensure!(!path.exists(), "LAB: duplicate crop {}", path.display());
+          +        crop.save(path)?;
+          +    }
+               Ok((!crops.is_empty()).then_some(crops))
+           }
+           
+          diff --git a/crates/koharu-runtime/src/huggingface.rs b/crates/koharu-runtime/src/huggingface.rs
+          index d59534f..c6e3c02 100644
+          --- a/crates/koharu-runtime/src/huggingface.rs
+          +++ b/crates/koharu-runtime/src/huggingface.rs
+          @@ -69,29 +69,8 @@ impl Repository {
+               #[tracing::instrument(skip_all, fields(repository = self.id))]
+               pub async fn resolve<const N: usize>(&self, names: [&str; N]) -> Result<[PathBuf; N]> {
+                   let paths = names.map(|name| self.path(name));
+          -        let mut expectations = None;
+          -        for (name, path) in names.iter().zip(&paths) {
+          -            // A file the store already has isn't transferred, so its listing
+          -            // isn't read either.
+          -            let expectation = if path.is_file() {
+          -                Expectation::default()
+          -            } else {
+          -                if expectations.is_none() {
+          -                    expectations = Some(self.expectations().await?);
+          -                }
+          -                expectations
+          -                    .as_ref()
+          -                    .and_then(|files| files.get(*name))
+          -                    .cloned()
+          -                    .unwrap_or_default()
+          -            };
+          -            store::put(
+          -                path,
+          -                path.clone(),
+          -                |path| path.is_file(),
+          -                |folder| self.fetch(name, folder, expectation),
+          -            )
+          -            .await?;
+          +        for path in &paths {
+          +            anyhow::ensure!(path.is_file(), "LAB_OFFLINE: missing model file {}", path.display());
+                   }
+                   Ok(paths)
+               }
+          diff --git a/crates/koharu-runtime/src/lib.rs b/crates/koharu-runtime/src/lib.rs
+          index cea167f..b16e050 100644
+          --- a/crates/koharu-runtime/src/lib.rs
+          +++ b/crates/koharu-runtime/src/lib.rs
+          @@ -59,7 +59,8 @@ pub fn referenced_repositories() -> Vec<RepositoryKind> {
+           /// Removes one version folder from the store, taking the lock a download holds
+           /// on it so a running transfer is never cut open.
+           pub async fn remove_from_store(folder: &Path) -> anyhow::Result<()> {
+          -    store::remove(folder).await
+          +    let _ = folder;
+          +    anyhow::bail!("LAB_OFFLINE: store maintenance disabled")
+           }
+           
+           /// Where every model runs: the best GPU, once what it needs is downloaded and
+          @@ -81,3 +82,9 @@ pub async fn device() -> anyhow::Result<&'static Device> {
+                   })
+                   .await
+           }
+          +
+          +/// Verify a locally provisioned laboratory file before runtime initialization.
+          +pub async fn lab_verify_file(path: &Path, size: u64, sha256: &str) -> anyhow::Result<()> {
+          +    store::Expectation { size: Some(size), sha256: Some(sha256.to_owned()) }
+          +        .verify(path).await
+          +}
+          diff --git a/crates/koharu-runtime/src/packages/mod.rs b/crates/koharu-runtime/src/packages/mod.rs
+          index 5617264..997a727 100644
+          --- a/crates/koharu-runtime/src/packages/mod.rs
+          +++ b/crates/koharu-runtime/src/packages/mod.rs
+          @@ -99,12 +99,7 @@ pub(crate) async fn start(gpu: &Device) -> Result<Device> {
+               for package in &packages {
+                   package.load(host, &mut gpu)?;
+               }
+          -    tokio::spawn(store::remove_others(
+          -        packages
+          -            .iter()
+          -            .flat_map(|package| package.versions())
+          -            .collect(),
+          -    ));
+          +    // Laboratory: never remove other package versions.
+               Ok(gpu)
+           }
+           
+          diff --git a/crates/koharu-runtime/src/store/mod.rs b/crates/koharu-runtime/src/store/mod.rs
+          index f6736c1..9aec907 100644
+          --- a/crates/koharu-runtime/src/store/mod.rs
+          +++ b/crates/koharu-runtime/src/store/mod.rs
+          @@ -111,29 +111,8 @@ where
+                   return Ok(target);
+               }
+           
+          -    let _lock = lock(scope).await?;
+          -    if valid(&target) {
+          -        return Ok(target);
+          -    }
+          -
+          -    // Not valid, so it's what's left of an incomplete one.
+          -    if fs_err::exists(&target)? {
+          -        fs_err::remove_dir_all(&target)?;
+          -    }
+          -    let parent = target
+          -        .parent()
+          -        .with_context(|| format!("{} has no parent folder", target.display()))?;
+          -    fs_err::create_dir_all(parent)?;
+          -    let stage = tempfile::Builder::new()
+          -        .prefix(".stage-")
+          -        .tempdir_in(parent)?;
+          -    let staged = write(stage.path().to_owned()).await?;
+          -    ensure!(
+          -        valid(&staged),
+          -        "the download produced an incomplete package"
+          -    );
+          -    fs_err::rename(&staged, &target)?;
+          -    Ok(target)
+          +    let _ = (scope, write);
+          +    anyhow::bail!("LAB_OFFLINE: missing or incomplete local resource: {}", target.display())
+           }
+           
+           #[cfg(test)]
+          @@ -255,3 +234,44 @@ mod tests {
+                   assert!(root.path().join("attempt").is_file());
+               }
+           }
+          +
+          +#[cfg(test)]
+          +mod lab_tests {
+          +    use super::*;
+          +
+          +    #[tokio::test]
+          +    async fn lab_missing_resource_does_not_write_or_repair() {
+          +        let temp = tempfile::tempdir().unwrap();
+          +        let target = temp.path().join("missing");
+          +        let result = put(&target, target.clone(), |p| p.is_file(), |_| async {
+          +            panic!("offline installer must not run");
+          +            #[allow(unreachable_code)]
+          +            Ok(PathBuf::new())
+          +        }).await;
+          +        assert!(result.is_err());
+          +        assert!(!target.exists());
+          +        fs_err::create_dir(&target).unwrap();
+          +        let sentinel = target.join("keep");
+          +        fs_err::write(&sentinel, b"unchanged").unwrap();
+          +        let result = put(&target, target.clone(), |p| p.is_file(), |_| async {
+          +            panic!("offline repair must not run");
+          +            #[allow(unreachable_code)]
+          +            Ok(PathBuf::new())
+          +        }).await;
+          +        assert!(result.is_err());
+          +        assert_eq!(fs_err::read(&sentinel).unwrap(), b"unchanged");
+          +    }
+          +
+          +    #[tokio::test]
+          +    async fn lab_existing_resource_is_returned() {
+          +        let temp = tempfile::tempdir().unwrap();
+          +        let target = temp.path().join("existing");
+          +        fs_err::write(&target, b"local").unwrap();
+          +        let result = put(&target, target.clone(), |p| p.is_file(), |_| async {
+          +            panic!("offline installer must not run");
+          +            #[allow(unreachable_code)]
+          +            Ok(PathBuf::new())
+          +        }).await.unwrap();
+          +        assert_eq!(result, target);
+          +    }
+          +}
+          diff --git a/crates/koharu-runtime/src/transfer/mod.rs b/crates/koharu-runtime/src/transfer/mod.rs
+          index 58d6f40..a45c84a 100644
+          --- a/crates/koharu-runtime/src/transfer/mod.rs
+          +++ b/crates/koharu-runtime/src/transfer/mod.rs
+          @@ -69,16 +69,11 @@ pub(crate) async fn fetch(url: &str, destination: &Path) -> Result<()> {
+           /// takes as long as the file does, so a response is never cut off for
+           /// arriving slowly.
+           pub(crate) async fn client() -> Result<&'static Client> {
+          -    static CLIENT: OnceCell<Client> = OnceCell::const_new();
+          -    CLIENT
+          -        .get_or_try_init(|| async {
+          -            Client::builder()
+          -                .user_agent(USER_AGENT)
+          -                .connect_timeout(CONNECT_TIMEOUT)
+          -                .http2_adaptive_window(true)
+          -                .tcp_keepalive(Duration::from_secs(60))
+          -                .build()
+          -                .context("couldn't build the HTTP client")
+          -        })
+          -        .await
+          +    anyhow::bail!("LAB_OFFLINE: HTTP client disabled")
+          +}
+          +
+          +#[cfg(test)]
+          +#[tokio::test]
+          +async fn lab_http_client_is_disabled() {
+          +    assert!(client().await.is_err());
+           }
+          '@
+          $patchPath = Join-Path $env:RUNNER_TEMP 'lab178.diff'
+          [IO.File]::WriteAllText($patchPath, ($patch.Replace("`r`n", "`n") + "`n"), [Text.UTF8Encoding]::new($false))
+          git apply --check $patchPath
+          if ($LASTEXITCODE -ne 0) { throw 'Patch precheck failed' }
+          git apply $patchPath
+          if ($LASTEXITCODE -ne 0) { throw 'Patch application failed' }
+          python $verifyPath after
+          if ($LASTEXITCODE -ne 0) { throw 'Patched fingerprints failed' }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid diff' }
+          git diff --stat
+      - name: Match upstream Windows LLVM requirement
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco upgrade llvm --version 22.1.8 --allow-downgrade --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw 'LLVM setup failed' }
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          if (-not (Test-Path (Join-Path $llvm 'libclang.dll'))) { throw 'libclang missing' }
+          "LIBCLANG_PATH=$llvm" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          rustc --version --verbose
+          cargo --version
+      - name: Test offline policy (CPU only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --release --locked -p koharu-runtime --lib lab_
+          if ($LASTEXITCODE -ne 0) { throw 'Offline tests failed' }
+      - name: Test mask allocation rules (CPU only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --release --locked -p koharu-ml --lib koharu_layout_highres::suppress::tests::
+          if ($LASTEXITCODE -ne 0) { throw 'Mask allocation tests failed' }
+          cargo test --release --locked -p koharu-ml --lib koharu_layout_highres::suppress::lab_recovery_tests::
+          if ($LASTEXITCODE -ne 0) { throw 'Recovery tests failed' }
+      - name: Compile headless diagnostic binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --locked -p koharu-batch --bin koharu-batch
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+      - name: Verify CLI guard and record artifact identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'target/release/koharu-batch.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Missing EXE' }
+          & $exe --help
+          if ($LASTEXITCODE -ne 0) { throw 'CLI help failed' }
+          # No input data and no GPU use: this invocation must refuse before store initialization.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $guard = & $exe run --output 'unused-lab-output' --stages translate 2>&1
+          if ($LASTEXITCODE -eq 0 -or ($guard -join ' ') -notmatch 'LAB: require --stages detect,recognize') { throw 'Stage guard failed' }
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          Write-Host "KOHARU_LAB_178_SHA256=$hash"
+          "$hash  koharu-batch.exe" | Set-Content 'target/release/koharu-lab-178-sha256.txt' -Encoding ascii
+          @("source=35505f9969f6703b0d90db36a384ed062fc3bdcb", "workflow_run=$env:GITHUB_RUN_ID", (rustc --version), (cargo --version)) | Set-Content 'target/release/koharu-lab-178-build.txt' -Encoding utf8
+      - name: Upload diagnostic executable and provenance only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: koharu-batch-0.93.0-highres-nms-recovery-lab-178
+          path: |
+            target/release/koharu-batch.exe
+            target/release/koharu-lab-178-sha256.txt
+            target/release/koharu-lab-178-build.txt
+          if-no-files-found: error
+          retention-days: 7
