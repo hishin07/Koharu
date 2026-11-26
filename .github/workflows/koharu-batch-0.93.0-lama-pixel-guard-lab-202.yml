@@ -1,0 +1,502 @@
+name: KoharuBatch 0.93.0 - LaMa Pixel Guard Lab 202
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Set checkout line endings
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - name: Checkout pinned public source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: Endymi0n74/KoharuBatch
+          ref: 35505f9969f6703b0d90db36a384ed062fc3bdcb
+          persist-credentials: false
+      - name: Verify and apply audited laboratory changes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = '35505f9969f6703b0d90db36a384ed062fc3bdcb'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) { throw 'Unexpected source commit' }
+          $verify = @'
+          from pathlib import Path
+          import hashlib, sys
+          before = {'crates/koharu-batch/src/main.rs': '2fcd2cc4cf32785f8deda76d9c605cea685c367ef65227c59fb4de36c419eb3d', 'crates/koharu-batch/src/run.rs': '3e3645324f722ff20ebca4a3f04c95d670e260d2b62ab050cd63b5c836ccdebf', 'crates/koharu-pipeline/src/stages/recognize/mod.rs': 'cab5a76c22cece197a64830addfe44b5d5c50c67763cf31c904fa13773ff6541', 'crates/koharu-runtime/src/huggingface.rs': 'd76657091efc33b9aacdad6e1f2f8992710a142e31121af85f883572456bc72b', 'crates/koharu-runtime/src/lib.rs': '83992ab797391e60173d8e95588134dbc21833543af5b827f7c3361ef477423b', 'crates/koharu-runtime/src/packages/mod.rs': 'fe2cd5a4670f3926881900b7e9a46c68c4f342f919c7784d53fb9d560cf2f3e8', 'crates/koharu-runtime/src/store/mod.rs': 'c55fbb16d1d423655245d0fca138614da9dfd7ca92ac7ba0f24b74a5fc638849', 'crates/koharu-runtime/src/transfer/mod.rs': '4c30b3a1793fa0b3187e2160e21a6597409cef1591529fe8a22413f00d5938a0'}
+          after = {'crates/koharu-batch/src/main.rs': 'b0c1a7e03a584e2454a8be44a7ad0e991c23369e7e100de8a311198b7c3534f2', 'crates/koharu-batch/src/run.rs': '59c589965c2284c91aa31e3fbd656b1568614a4f2eaa1061c879c058a32003df', 'crates/koharu-pipeline/src/stages/recognize/mod.rs': 'c8ab6d273f151b382344a6fd644e8652b9f74c74d976077d8717b86638bc9bd8', 'crates/koharu-runtime/src/huggingface.rs': '537c31af236e113056aa349f51fa4cd232c80b19925dc15678166dc4b8289bd8', 'crates/koharu-runtime/src/lib.rs': 'a80678e57fe50aa308b094afef9498ddbc0f00ecbe969f37f00c57d17851b2c0', 'crates/koharu-runtime/src/packages/mod.rs': 'ba2052377542cf1afda98beb52141a4bc4ee8b338819628c4b066af650a90619', 'crates/koharu-runtime/src/store/mod.rs': '33260adf43c3e81a437cbb02caf937f42a8c38cc44d99129478753a1a2ccbd85', 'crates/koharu-runtime/src/transfer/mod.rs': '9315b94afba3eac3f498d9c3f188948df6a90b9b2555097982a53700009530bf'}
+          for name, expected in (before if sys.argv[1] == 'before' else after).items():
+              data = Path(name).read_bytes().replace(b"\r\n", b"\n")
+              if hashlib.sha256(data).hexdigest() != expected:
+                  raise SystemExit('Unexpected source file: ' + name)
+          print('Source fingerprints verified:', sys.argv[1])
+          '@
+          $verifyPath = Join-Path $env:RUNNER_TEMP 'lab_verify.py'
+          [IO.File]::WriteAllText($verifyPath, $verify, [Text.UTF8Encoding]::new($false))
+          python $verifyPath before
+          if ($LASTEXITCODE -ne 0) { throw 'Source fingerprints failed' }
+          $patch = @'
+          diff --git a/crates/koharu-batch/src/main.rs b/crates/koharu-batch/src/main.rs
+          --- a/crates/koharu-batch/src/main.rs
+          +++ b/crates/koharu-batch/src/main.rs
+          @@ -24,7 +24,6 @@
+               let arguments = cli::Arguments::parse();
+               match arguments.command {
+                   Command::Run(run) => run::run(&run).await,
+          -        Command::Report(report) => report::report(&report),
+          -        Command::Prune(prune) => prune::prune(&prune).await,
+          +        Command::Report(_) | Command::Prune(_) => anyhow::bail!("LAB: only the diagnostic run is enabled"),
+               }
+           }
+          diff --git a/crates/koharu-batch/src/run.rs b/crates/koharu-batch/src/run.rs
+          --- a/crates/koharu-batch/src/run.rs
+          +++ b/crates/koharu-batch/src/run.rs
+          @@ -35,17 +35,22 @@
+           }
+           
+           pub async fn run(arguments: &Run) -> Result<()> {
+          +    ensure!(arguments.stages == ["detect", "recognize"], "LAB: require --stages detect,recognize");
+          +    ensure!(!arguments.overwrite && arguments.pages.is_none(), "LAB: new project, all input pages only");
+          +    ensure!(arguments.detector == "koharu-layout-highres" && arguments.ocr == "hayai-ocr", "LAB: fixed detector and OCR");
+          +    let output_dir = &arguments.output;
+          +    verify_lab(output_dir).await?;
+               let config = config(arguments)?;
+          -    let output_dir = &arguments.output;
+          +    let started = std::time::Instant::now();
+               if output_dir.is_file() {
+                   bail!(
+                       "{} is a file, not a folder; pick a folder for the translated images",
+                       output_dir.display()
+                   );
+               }
+          -    if !output_dir.exists() {
+          -        fs_err::create_dir_all(output_dir)?;
+          -    }
+          +    fs_err::create_dir(output_dir)?;
+          +    fs_err::create_dir(output_dir.join("crops"))?;
+          +    fs_err::create_dir(output_dir.join("masks"))?;
+               let (session, resuming) = prepare(arguments, output_dir)?;
+               let pages: Vec<PageId> = session
+                   .lock()
+          @@ -89,14 +94,46 @@
+               } else {
+                   progress.abort();
+               }
+          -    // Export translated pages to the output folder.
+          +    fs_err::write(output_dir.join("events.json"), serde_json::to_vec_pretty(&history)?)?;
+          +    if !matches!(history.last(), Some(Event::Ended { .. })) {
+          +        pipeline.stop();
+          +    }
+          +    report(&history, arguments)?;
+          +    let finished: Vec<_> = history.iter().filter_map(|event| match event {
+          +        Event::Finished { page, stage, .. } => Some((*page, *stage)),
+          +        _ => None,
+          +    }).collect();
+          +    let expected: BTreeSet<_> = pages.iter().flat_map(|page| [(*page, Stage::Detect), (*page, Stage::Recognize)]).collect();
+          +    ensure!(finished.len() == expected.len() && finished.into_iter().collect::<BTreeSet<_>>() == expected,
+          +        "LAB: incomplete or duplicate stage history");
+          +    let elapsed = started.elapsed().as_secs_f64();
+               let session_lock = session.lock();
+               let project = session_lock.project();
+          +    let mut results = Vec::new();
+               for (index, page) in project.pages().enumerate() {
+          -        let page_id = page.id;
+          -        render_page(&session_lock, output_dir, page_id, index)?;
+          -    }
+          -    report(&history, arguments)
+          +        let mut blocks = Vec::new();
+          +        for (id, block) in project.blocks(page.id)? {
+          +            let tiles = session_lock.tiles(block.mask.id, None)?;
+          +            let mask = if let Some((rect, pixels)) = tiles.coverage(page.size.width, page.size.height) {
+          +                let filename = format!("masks/{id}.png");
+          +                pixels.save(output_dir.join(&filename))?;
+          +                json!({"rect": rect, "file": filename})
+          +            } else { serde_json::Value::Null };
+          +            let filename = format!("crops/{id}.png");
+          +            let crop = output_dir.join(&filename).is_file().then_some(filename);
+          +            let layer = project.layer(id)?;
+          +            let score = layer.attributes.get("koharu").and_then(|v| v.get("detection")).and_then(|v| v.get("score"));
+          +            blocks.push(json!({"id": id, "role": block.role, "source": block.source.content.text(),
+          +                "frame": block.source, "score": score, "mask": mask, "crop": crop}));
+          +        }
+          +        results.push(json!({"index": index + 1, "scene": page, "blocks": blocks}));
+          +    }
+          +    ensure!(results.len() == pages.len(), "LAB: page count mismatch");
+          +    fs_err::write(output_dir.join("diagnostics.json"), serde_json::to_vec_pretty(&json!({
+          +        "schema": "koharu-highres-hayai-lab-v1", "source_commit": "35505f9969f6703b0d90db36a384ed062fc3bdcb",
+          +        "pipeline_seconds_including_import": elapsed, "pages": results
+          +    }))?)?;
+          +    Ok(())
+           }
+           
+           /// The project to work on: the existing output when `--overwrite` resumes it,
+          @@ -477,3 +514,67 @@
+                   assert_eq!(session.lock().project().pages().count(), 0);
+               }
+           }
+          +
+          +// The provisioner creates the dedicated lab layout and its complete manifest.
+          +fn lab_metadata(path: &Path) -> Result<std::fs::Metadata> {
+          +    let metadata = std::fs::symlink_metadata(path)?;
+          +    ensure!(!metadata.file_type().is_symlink(), "LAB: symlink refused: {}", path.display());
+          +    #[cfg(windows)]
+          +    {
+          +        use std::os::windows::fs::MetadataExt;
+          +        ensure!(metadata.file_attributes() & 0x400 == 0, "LAB: reparse point refused: {}", path.display());
+          +    }
+          +    Ok(metadata)
+          +}
+          +
+          +fn lab_files(root: &Path, dir: &Path, files: &mut std::collections::BTreeMap<String, PathBuf>) -> Result<()> {
+          +    for entry in std::fs::read_dir(dir)? {
+          +        let path = entry?.path();
+          +        let metadata = lab_metadata(&path)?;
+          +        if metadata.is_dir() {
+          +            lab_files(root, &path, files)?;
+          +        } else {
+          +            ensure!(metadata.is_file(), "LAB: non-file resource");
+          +            let name = path.strip_prefix(root)?.to_str().context("LAB: non-UTF8 resource path")?.replace('\\', "/");
+          +            ensure!(files.insert(name, path).is_none(), "LAB: duplicate resource");
+          +        }
+          +    }
+          +    Ok(())
+          +}
+          +
+          +async fn verify_lab(output: &Path) -> Result<()> {
+          +    let exe = std::env::current_exe()?;
+          +    let bin = exe.parent().context("LAB: no bin directory")?;
+          +    ensure!(bin.file_name().and_then(|s| s.to_str()) == Some("bin"), "LAB: expected bin directory");
+          +    let lab = bin.parent().context("LAB: no lab directory")?;
+          +    ensure!(lab_metadata(lab)?.is_dir() && lab_metadata(bin)?.is_dir(), "LAB: invalid lab layout");
+          +    let root = lab.join("store");
+          +    ensure!(lab_metadata(&root)?.is_dir(), "LAB: missing dedicated store");
+          +    let store = PathBuf::from(std::env::var_os("KOHARU_STORE").context("LAB: KOHARU_STORE required")?);
+          +    ensure!(store.is_absolute() && store.canonicalize()? == root.canonicalize()?, "LAB: wrong store");
+          +    ensure!(lab_metadata(&store)?.is_dir(), "LAB: invalid store path");
+          +    let jobs = lab.join("jobs");
+          +    ensure!(lab_metadata(&jobs)?.is_dir(), "LAB: missing jobs directory");
+          +    ensure!(output.is_absolute() && output.parent().context("LAB: no output parent")?.canonicalize()? == jobs.canonicalize()?, "LAB: output must be a new direct child of jobs");
+          +    let named_output = PathBuf::from(std::env::var_os("KOHARU_LAB_OUTPUT").context("LAB: KOHARU_LAB_OUTPUT required")?);
+          +    ensure!(named_output == output && !output.exists(), "LAB: output mismatch or already exists");
+          +    let manifest_path = lab.join("store-manifest.json");
+          +    ensure!(lab_metadata(&manifest_path)?.is_file(), "LAB: missing manifest");
+          +    let manifest: serde_json::Value = serde_json::from_slice(&fs_err::read(&manifest_path)?)?;
+          +    ensure!(manifest["schema"] == "koharu-highres-hayai-store-v1", "LAB: wrong manifest schema");
+          +    let entries = manifest["files"].as_array().context("LAB: manifest files missing")?;
+          +    let mut actual = std::collections::BTreeMap::new();
+          +    lab_files(&root, &root, &mut actual)?;
+          +    ensure!(!entries.is_empty() && entries.len() == actual.len(), "LAB: store inventory mismatch");
+          +    for entry in entries {
+          +        let name = entry["relative_path"].as_str().context("LAB: missing path")?;
+          +        let size = entry["size_bytes"].as_u64().context("LAB: missing size")?;
+          +        let sha = entry["sha256"].as_str().context("LAB: missing SHA256")?;
+          +        ensure!(sha.len() == 64 && sha.bytes().all(|c| c.is_ascii_hexdigit()), "LAB: invalid SHA256");
+          +        let path = actual.remove(name).context("LAB: unknown or duplicate manifest path")?;
+          +        koharu_runtime::lab_verify_file(&path, size, sha).await?;
+          +    }
+          +    ensure!(actual.is_empty(), "LAB: unlisted resources");
+          +    println!("LAB: local store verified ({} files)", entries.len());
+          +    Ok(())
+          +}
+          diff --git a/crates/koharu-pipeline/src/stages/recognize/mod.rs b/crates/koharu-pipeline/src/stages/recognize/mod.rs
+          --- a/crates/koharu-pipeline/src/stages/recognize/mod.rs
+          +++ b/crates/koharu-pipeline/src/stages/recognize/mod.rs
+          @@ -129,6 +129,13 @@
+                       Some((id, DynamicImage::ImageRgb8(crop)))
+                   })
+                   .collect();
+          +    let output = std::path::PathBuf::from(std::env::var_os("KOHARU_LAB_OUTPUT")
+          +        .ok_or_else(|| anyhow::anyhow!("LAB: missing crop output"))?);
+          +    for (id, crop) in &crops {
+          +        let path = output.join("crops").join(format!("{id}.png"));
+          +        anyhow::ensure!(!path.exists(), "LAB: duplicate crop {}", path.display());
+          +        crop.save(path)?;
+          +    }
+               Ok((!crops.is_empty()).then_some(crops))
+           }
+           
+          diff --git a/crates/koharu-runtime/src/huggingface.rs b/crates/koharu-runtime/src/huggingface.rs
+          --- a/crates/koharu-runtime/src/huggingface.rs
+          +++ b/crates/koharu-runtime/src/huggingface.rs
+          @@ -69,29 +69,8 @@
+               #[tracing::instrument(skip_all, fields(repository = self.id))]
+               pub async fn resolve<const N: usize>(&self, names: [&str; N]) -> Result<[PathBuf; N]> {
+                   let paths = names.map(|name| self.path(name));
+          -        let mut expectations = None;
+          -        for (name, path) in names.iter().zip(&paths) {
+          -            // A file the store already has isn't transferred, so its listing
+          -            // isn't read either.
+          -            let expectation = if path.is_file() {
+          -                Expectation::default()
+          -            } else {
+          -                if expectations.is_none() {
+          -                    expectations = Some(self.expectations().await?);
+          -                }
+          -                expectations
+          -                    .as_ref()
+          -                    .and_then(|files| files.get(*name))
+          -                    .cloned()
+          -                    .unwrap_or_default()
+          -            };
+          -            store::put(
+          -                path,
+          -                path.clone(),
+          -                |path| path.is_file(),
+          -                |folder| self.fetch(name, folder, expectation),
+          -            )
+          -            .await?;
+          +        for path in &paths {
+          +            anyhow::ensure!(path.is_file(), "LAB_OFFLINE: missing model file {}", path.display());
+                   }
+                   Ok(paths)
+               }
+          diff --git a/crates/koharu-runtime/src/lib.rs b/crates/koharu-runtime/src/lib.rs
+          --- a/crates/koharu-runtime/src/lib.rs
+          +++ b/crates/koharu-runtime/src/lib.rs
+          @@ -59,7 +59,8 @@
+           /// Removes one version folder from the store, taking the lock a download holds
+           /// on it so a running transfer is never cut open.
+           pub async fn remove_from_store(folder: &Path) -> anyhow::Result<()> {
+          -    store::remove(folder).await
+          +    let _ = folder;
+          +    anyhow::bail!("LAB_OFFLINE: store maintenance disabled")
+           }
+           
+           /// Where every model runs: the best GPU, once what it needs is downloaded and
+          @@ -81,3 +82,9 @@
+                   })
+                   .await
+           }
+          +
+          +/// Verify a locally provisioned laboratory file before runtime initialization.
+          +pub async fn lab_verify_file(path: &Path, size: u64, sha256: &str) -> anyhow::Result<()> {
+          +    store::Expectation { size: Some(size), sha256: Some(sha256.to_owned()) }
+          +        .verify(path).await
+          +}
+          diff --git a/crates/koharu-runtime/src/packages/mod.rs b/crates/koharu-runtime/src/packages/mod.rs
+          --- a/crates/koharu-runtime/src/packages/mod.rs
+          +++ b/crates/koharu-runtime/src/packages/mod.rs
+          @@ -99,12 +99,7 @@
+               for package in &packages {
+                   package.load(host, &mut gpu)?;
+               }
+          -    tokio::spawn(store::remove_others(
+          -        packages
+          -            .iter()
+          -            .flat_map(|package| package.versions())
+          -            .collect(),
+          -    ));
+          +    // Laboratory: never remove other package versions.
+               Ok(gpu)
+           }
+           
+          diff --git a/crates/koharu-runtime/src/store/mod.rs b/crates/koharu-runtime/src/store/mod.rs
+          --- a/crates/koharu-runtime/src/store/mod.rs
+          +++ b/crates/koharu-runtime/src/store/mod.rs
+          @@ -111,29 +111,8 @@
+                   return Ok(target);
+               }
+           
+          -    let _lock = lock(scope).await?;
+          -    if valid(&target) {
+          -        return Ok(target);
+          -    }
+          -
+          -    // Not valid, so it's what's left of an incomplete one.
+          -    if fs_err::exists(&target)? {
+          -        fs_err::remove_dir_all(&target)?;
+          -    }
+          -    let parent = target
+          -        .parent()
+          -        .with_context(|| format!("{} has no parent folder", target.display()))?;
+          -    fs_err::create_dir_all(parent)?;
+          -    let stage = tempfile::Builder::new()
+          -        .prefix(".stage-")
+          -        .tempdir_in(parent)?;
+          -    let staged = write(stage.path().to_owned()).await?;
+          -    ensure!(
+          -        valid(&staged),
+          -        "the download produced an incomplete package"
+          -    );
+          -    fs_err::rename(&staged, &target)?;
+          -    Ok(target)
+          +    let _ = (scope, write);
+          +    anyhow::bail!("LAB_OFFLINE: missing or incomplete local resource: {}", target.display())
+           }
+           
+           #[cfg(test)]
+          @@ -255,3 +234,44 @@
+                   assert!(root.path().join("attempt").is_file());
+               }
+           }
+          +
+          +#[cfg(test)]
+          +mod lab_tests {
+          +    use super::*;
+          +
+          +    #[tokio::test]
+          +    async fn lab_missing_resource_does_not_write_or_repair() {
+          +        let temp = tempfile::tempdir().unwrap();
+          +        let target = temp.path().join("missing");
+          +        let result = put(&target, target.clone(), |p| p.is_file(), |_| async {
+          +            panic!("offline installer must not run");
+          +            #[allow(unreachable_code)]
+          +            Ok(PathBuf::new())
+          +        }).await;
+          +        assert!(result.is_err());
+          +        assert!(!target.exists());
+          +        fs_err::create_dir(&target).unwrap();
+          +        let sentinel = target.join("keep");
+          +        fs_err::write(&sentinel, b"unchanged").unwrap();
+          +        let result = put(&target, target.clone(), |p| p.is_file(), |_| async {
+          +            panic!("offline repair must not run");
+          +            #[allow(unreachable_code)]
+          +            Ok(PathBuf::new())
+          +        }).await;
+          +        assert!(result.is_err());
+          +        assert_eq!(fs_err::read(&sentinel).unwrap(), b"unchanged");
+          +    }
+          +
+          +    #[tokio::test]
+          +    async fn lab_existing_resource_is_returned() {
+          +        let temp = tempfile::tempdir().unwrap();
+          +        let target = temp.path().join("existing");
+          +        fs_err::write(&target, b"local").unwrap();
+          +        let result = put(&target, target.clone(), |p| p.is_file(), |_| async {
+          +            panic!("offline installer must not run");
+          +            #[allow(unreachable_code)]
+          +            Ok(PathBuf::new())
+          +        }).await.unwrap();
+          +        assert_eq!(result, target);
+          +    }
+          +}
+          diff --git a/crates/koharu-runtime/src/transfer/mod.rs b/crates/koharu-runtime/src/transfer/mod.rs
+          --- a/crates/koharu-runtime/src/transfer/mod.rs
+          +++ b/crates/koharu-runtime/src/transfer/mod.rs
+          @@ -69,16 +69,11 @@
+           /// takes as long as the file does, so a response is never cut off for
+           /// arriving slowly.
+           pub(crate) async fn client() -> Result<&'static Client> {
+          -    static CLIENT: OnceCell<Client> = OnceCell::const_new();
+          -    CLIENT
+          -        .get_or_try_init(|| async {
+          -            Client::builder()
+          -                .user_agent(USER_AGENT)
+          -                .connect_timeout(CONNECT_TIMEOUT)
+          -                .http2_adaptive_window(true)
+          -                .tcp_keepalive(Duration::from_secs(60))
+          -                .build()
+          -                .context("couldn't build the HTTP client")
+          -        })
+          -        .await
+          +    anyhow::bail!("LAB_OFFLINE: HTTP client disabled")
+           }
+          +
+          +#[cfg(test)]
+          +#[tokio::test]
+          +async fn lab_http_client_is_disabled() {
+          +    assert!(client().await.is_err());
+          +}
+          '@
+          $patchPath = Join-Path $env:RUNNER_TEMP 'lab155.diff'
+          [IO.File]::WriteAllText($patchPath, ($patch.Replace("`r`n", "`n") + "`n"), [Text.UTF8Encoding]::new($false))
+          git apply --check $patchPath
+          if ($LASTEXITCODE -ne 0) { throw 'Patch precheck failed' }
+          git apply $patchPath
+          if ($LASTEXITCODE -ne 0) { throw 'Patch application failed' }
+          python $verifyPath after
+          if ($LASTEXITCODE -ne 0) { throw 'Patched fingerprints failed' }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid diff' }
+          git diff --stat
+      - name: Add isolated LaMa replay mode
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $patch = @'
+          from pathlib import Path
+          import hashlib
+          
+          def digest(s):
+              return hashlib.sha256(s.encode('utf-8')).hexdigest()
+          for name, before, after, data in [
+              ('crates/koharu-batch/src/main.rs', 'b0c1a7e03a584e2454a8be44a7ad0e991c23369e7e100de8a311198b7c3534f2', '5e8eee1887608ccb32de54108753dc1f532eecb5cfbb9e4423df69806e5b14e7', '//! `koharu-batch`: one chapter, end to end, from a terminal.\n\nmod cli;\nmod preset;\nmod prune;\nmod report;\nmod run;\n\nuse anyhow::Result;\n\n\n#[tokio::main]\nasync fn main() -> Result<()> {\n    tracing_subscriber::fmt()\n        .with_env_filter(\n            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {\n                tracing_subscriber::EnvFilter::new("warn,koharu_batch=info,koharu_pipeline=info")\n            }),\n        )\n        .with_writer(std::io::stderr)\n        .init();\n    let args: Vec<_> = std::env::args_os().skip(1).collect();\n    if args.len() == 1 && args[0] == std::ffi::OsStr::new("--help") {\n        println!("LAB202: lab-lama-replay INPUT_MANIFEST OUTPUT_DIR");\n        return Ok(());\n    }\n    anyhow::ensure!(args.len() == 3 && args[0] == std::ffi::OsStr::new("lab-lama-replay"), "LAB202: usage lab-lama-replay INPUT_MANIFEST OUTPUT_DIR");\n    run::run_lama_replay(std::path::Path::new(&args[1]), std::path::Path::new(&args[2])).await\n}\n'),
+              ('crates/koharu-batch/src/run.rs', '59c589965c2284c91aa31e3fbd656b1568614a4f2eaa1061c879c058a32003df', 'f85b8394b1ae0fd195fd38bd30ccc2740a2f3fc5e5b582ade55c6800c9d13399', '\n/// LAB202: isolated LaMa replay; no project edits, OCR, detection or translation.\n/// Masks are binary full-page PNGs. No change is allowed outside the effective mask.\nfn lab202_effective(request: &image::GrayImage, protect: &image::GrayImage) -> Result<image::GrayImage> {\n    ensure!(request.dimensions() == protect.dimensions(), "LAB202: mask size mismatch");\n    ensure!(request.as_raw().iter().chain(protect.as_raw()).all(|&v| v == 0 || v == 255), "LAB202: masks must be binary");\n    Ok(image::GrayImage::from_fn(request.width(), request.height(), |x, y| {\n        image::Luma([if request.get_pixel(x,y).0[0] != 0 && protect.get_pixel(x,y).0[0] == 0 {255} else {0}])\n    }))\n}\n\nfn lab202_compose(original: &image::RgbImage, drawn: &image::RgbImage, mask: &image::GrayImage) -> Result<image::RgbImage> {\n    ensure!(original.dimensions() == drawn.dimensions() && original.dimensions() == mask.dimensions(), "LAB202: compose size mismatch");\n    Ok(image::RgbImage::from_fn(original.width(), original.height(), |x,y| {\n        if mask.get_pixel(x,y).0[0] == 255 { *drawn.get_pixel(x,y) } else { *original.get_pixel(x,y) }\n    }))\n}\n\nasync fn lab202_read(folder: &Path, row: &serde_json::Value, expected_name: &str) -> Result<image::DynamicImage> {\n    ensure!(row["name"].as_str() == Some(expected_name), "LAB202: unexpected image name");\n    let path = folder.join(expected_name);\n    ensure!(lab_metadata(&path)?.is_file(), "LAB202: invalid input file");\n    let size = row["size_bytes"].as_u64().context("LAB202: missing file size")?;\n    let sha = row["sha256"].as_str().context("LAB202: missing file hash")?;\n    ensure!(size > 0 && size <= 20_000_000 && sha.len() == 64 && sha.bytes().all(|c| c.is_ascii_hexdigit()), "LAB202: invalid input identity");\n    koharu_runtime::lab_verify_file(&path, size, sha).await?;\n    // Inspect dimensions before allocating decoded pixels; only PNG accepted.\n    let reader = image::ImageReader::open(&path)?.with_guessed_format()?;\n    ensure!(reader.format() == Some(image::ImageFormat::Png), "LAB202: expected PNG");\n    let (w,h) = reader.into_dimensions()?;\n    ensure!(w > 0 && h > 0 && w <= 4096 && h <= 4096 && u64::from(w)*u64::from(h) <= 4_000_000, "LAB202: image too large");\n    let img = image::open(&path)?;\n    ensure!(img.width() == w && img.height() == h, "LAB202: decoded size mismatch");\n    Ok(img)\n}\n\npub async fn run_lama_replay(manifest_path: &Path, output: &Path) -> Result<()> {\n    verify_lab(output).await?;\n    let exe = std::env::current_exe()?;\n    let lab = exe.parent().and_then(Path::parent).context("LAB202: invalid executable layout")?;\n    let inputs = lab.join("inputs");\n    ensure!(lab_metadata(&inputs)?.is_dir(), "LAB202: missing inputs");\n    let folder = manifest_path.parent().context("LAB202: missing input folder")?;\n    ensure!(manifest_path.is_absolute() && folder.parent().context("LAB202: invalid folder")?.canonicalize()? == inputs.canonicalize()?, "LAB202: input must be a direct child of inputs");\n    ensure!(lab_metadata(folder)?.is_dir() && lab_metadata(manifest_path)?.is_file(), "LAB202: invalid manifest path");\n    ensure!(manifest_path.file_name().and_then(|n| n.to_str()) == Some("lama-manifest.json"), "LAB202: wrong manifest filename");\n    let bytes = fs_err::read(manifest_path)?;\n    ensure!(bytes.len() <= 100_000, "LAB202: oversized manifest");\n    let manifest: serde_json::Value = serde_json::from_slice(&bytes)?;\n    ensure!(manifest["schema"] == "koharu-lama-replay-v1", "LAB202: wrong manifest schema");\n    let rows = manifest["pages"].as_array().context("LAB202: missing pages")?;\n    ensure!(!rows.is_empty() && rows.len() <= 8, "LAB202: require 1 to 8 pages");\n    let mut work = Vec::new();\n    for (i,row) in rows.iter().enumerate() {\n        let prefix = format!("page-{:02}", i+1);\n        let original = lab202_read(folder, &row["image"], &format!("{prefix}-original.png")).await?;\n        let request = lab202_read(folder, &row["request"], &format!("{prefix}-request.png")).await?;\n        let protect = lab202_read(folder, &row["protect"], &format!("{prefix}-protect.png")).await?;\n        ensure!(original.color() == image::ColorType::Rgb8 && request.color() == image::ColorType::L8 && protect.color() == image::ColorType::L8, "LAB202: require RGB8 scan and L8 masks");\n        let (original, request, protect) = (original.into_rgb8(), request.into_luma8(), protect.into_luma8());\n        ensure!(original.dimensions() == request.dimensions(), "LAB202: scan/mask mismatch");\n        let effective = lab202_effective(&request, &protect)?;\n        work.push((prefix,original,request,protect,effective));\n    }\n    fs_err::create_dir(output)?;\n    let started = std::time::Instant::now();\n    let device = koharu_runtime::device().await?;\n    ensure!(matches!(device.backend, koharu_runtime::Backend::Cuda { .. }), "LAB202: CUDA required");\n    let model = koharu_ml::lama::Lama::load(device).await?;\n    let load_seconds = started.elapsed().as_secs_f64();\n    let mut results = Vec::new();\n    for (prefix,original,request,protect,effective) in work {\n        let timer = std::time::Instant::now();\n        let requested = request.as_raw().iter().filter(|&&v| v != 0).count();\n        let allowed = effective.as_raw().iter().filter(|&&v| v != 0).count();\n        let protected = protect.as_raw().iter().filter(|&&v| v != 0).count();\n        let drawn = if allowed == 0 {original.clone()} else {model.inference(&image::DynamicImage::ImageRgb8(original.clone()), &effective)?};\n        ensure!(drawn.dimensions() == original.dimensions(), "LAB202: model output size mismatch");\n        let final_image = lab202_compose(&original,&drawn,&effective)?;\n        let mut raw_outside = 0usize;\n        let mut changed = 0usize;\n        for (x,y,pixel) in original.enumerate_pixels() {\n            if effective.get_pixel(x,y).0[0] == 0 && drawn.get_pixel(x,y) != pixel {raw_outside += 1;}\n            if final_image.get_pixel(x,y) != pixel {\n                ensure!(effective.get_pixel(x,y).0[0] == 255 && protect.get_pixel(x,y).0[0] == 0, "LAB202: forbidden pixel change");\n                changed += 1;\n            }\n        }\n        effective.save(output.join(format!("{prefix}-effective.png")))?;\n        drawn.save(output.join(format!("{prefix}-raw.png")))?;\n        let final_path = output.join(format!("{prefix}-clean.png"));\n        final_image.save(&final_path)?;\n        ensure!(image::open(&final_path)?.into_rgb8() == final_image, "LAB202: saved PNG mismatch");\n        results.push(json!({"page":prefix,"width":original.width(),"height":original.height(),"requested_pixels":requested,"protected_pixels":protected,"allowed_pixels":allowed,"blocked_overlap_pixels":requested-allowed,"raw_changed_outside_effective":raw_outside,"changed_pixels":changed,"final_changed_outside_effective":0,"final_changed_protected":0,"seconds":timer.elapsed().as_secs_f64(),"status":"diagnostic_only_not_for_publication"}));\n    }\n    fs_err::write(output.join("lama-replay.json"),serde_json::to_vec_pretty(&json!({"schema":"koharu-lama-replay-result-v1","source_commit":"35505f9969f6703b0d90db36a384ed062fc3bdcb","model_revision":"f91c85b26913b3e83f9877867b4c336da3675238","device":&device.description,"load_seconds":load_seconds,"elapsed_seconds":started.elapsed().as_secs_f64(),"results":results}))?)?;\n    Ok(())\n}\n\n#[cfg(test)]\nmod lab202_tests {\n    use super::*;\n    use image::{GrayImage, RgbImage, Rgb};\n    #[test]\n    fn lab202_overlap_and_composition() {\n        let request = GrayImage::from_raw(3,1,vec![255,255,0]).unwrap();\n        let protect = GrayImage::from_raw(3,1,vec![0,255,0]).unwrap();\n        let effective = lab202_effective(&request,&protect).unwrap();\n        assert_eq!(effective.as_raw(),&[255,0,0]);\n        let original = RgbImage::from_pixel(3,1,Rgb([10,20,30]));\n        let drawn = RgbImage::from_pixel(3,1,Rgb([200,200,200]));\n        let result = lab202_compose(&original,&drawn,&effective).unwrap();\n        assert_eq!(result.get_pixel(0,0),drawn.get_pixel(0,0));\n        assert_eq!(result.get_pixel(1,0),original.get_pixel(1,0));\n        assert_eq!(result.get_pixel(2,0),original.get_pixel(2,0));\n        assert!(lab202_effective(&request,&GrayImage::new(1,1)).is_err());\n        assert!(lab202_effective(&request,&GrayImage::from_raw(3,1,vec![1,0,0]).unwrap()).is_err());\n    }\n}\n'),
+          ]:
+              p = Path(name)
+              s = p.read_text(encoding='utf-8')
+              assert digest(s) == before, 'unexpected lab155 source: ' + name
+              s = s + data if name.endswith('/run.rs') else data
+              assert digest(s) == after, 'unexpected lab202 source: ' + name
+              p.write_bytes(s.encode('utf-8'))
+          '@
+          $patchPath = Join-Path $env:RUNNER_TEMP 'lab202.py'
+          [IO.File]::WriteAllText($patchPath, $patch, [Text.UTF8Encoding]::new($false))
+          python $patchPath
+          if ($LASTEXITCODE -ne 0) { throw 'LaMa replay patch failed' }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid diff' }
+      - name: Match upstream Windows LLVM requirement
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco upgrade llvm --version 22.1.8 --allow-downgrade --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw 'LLVM setup failed' }
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          if (-not (Test-Path (Join-Path $llvm 'libclang.dll'))) { throw 'libclang missing' }
+          "LIBCLANG_PATH=$llvm" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          rustc --version --verbose
+          cargo --version
+      - name: Test offline policy (CPU only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --release --locked -p koharu-runtime --lib lab_
+          if ($LASTEXITCODE -ne 0) { throw 'Offline tests failed' }
+      - name: Test pixel guard (CPU only)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --release --locked -p koharu-batch --bin koharu-batch lab202_
+          if ($LASTEXITCODE -ne 0) { throw 'Pixel guard tests failed' }
+      - name: Compile headless diagnostic binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --locked -p koharu-batch --bin koharu-batch
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+      - name: Verify CLI guard and record artifact identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'target/release/koharu-batch.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Missing EXE' }
+          & $exe --help
+          if ($LASTEXITCODE -ne 0) { throw 'CLI help failed' }
+          # No input data and no GPU use: this invocation must refuse before store initialization.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $guard = & $exe run --output 'unused-lab-output' --stages translate 2>&1
+          if ($LASTEXITCODE -eq 0 -or ($guard -join ' ') -notmatch 'LAB202: usage lab-lama-replay') { throw 'Stage guard failed' }
+          $guard = & $exe lab-lama-replay 2>&1
+          if ($LASTEXITCODE -eq 0 -or ($guard -join ' ') -notmatch 'LAB202: usage lab-lama-replay') { throw 'LaMa replay argument guard failed' }
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          Write-Host "KOHARU_LAB_202_SHA256=$hash"
+          "$hash  koharu-batch.exe" | Set-Content 'target/release/koharu-lab-202-sha256.txt' -Encoding ascii
+          @("source=35505f9969f6703b0d90db36a384ed062fc3bdcb", "workflow_run=$env:GITHUB_RUN_ID", (rustc --version), (cargo --version)) | Set-Content 'target/release/koharu-lab-202-build.txt' -Encoding utf8
+      - name: Upload diagnostic executable and provenance only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: koharu-batch-0.93.0-lama-pixel-guard-lab-202
+          path: |
+            target/release/koharu-batch.exe
+            target/release/koharu-lab-202-sha256.txt
+            target/release/koharu-lab-202-build.txt
+          if-no-files-found: error
+          retention-days: 7
