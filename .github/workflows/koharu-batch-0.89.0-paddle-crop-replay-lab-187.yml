@@ -1,0 +1,187 @@
+name: Koharu v0.89.0 - Paddle Crop Replay Lab 187
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Pinned Paddle OCR replay - no manga data
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Set checkout line endings
+        shell: pwsh
+        run: git config --global core.autocrlf false
+      - name: Checkout exactly the audited public source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: Endymi0n74/Koharu
+          ref: 30db248cb365e630a94f44bf7e02e87bd5dc8c6b
+          persist-credentials: false
+
+      - name: Verify exact commit
+        shell: pwsh
+        run: |
+          $expected = '30db248cb365e630a94f44bf7e02e87bd5dc8c6b'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) {
+            throw "Unexpected source commit: $actual"
+          }
+          Write-Host "Audited commit confirmed: $actual"
+
+      - name: Apply audited offline runtime and dedicated OCR binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $patch = @'
+          from pathlib import Path
+          import hashlib
+
+          def replace_once(text, before, after, label):
+              count = text.count(before)
+              if count != 1: raise SystemExit(f"FATAL: {label}: expected 1 anchor, got {count}")
+              return text.replace(before, after, 1)
+
+          PRIVACY_EXPECTED = {'crates/koharu-runtime/src/store.rs': '741396BB4C85D6E3F4F5E5CAD40147778EB45F528EA713065D4B63433DDC969B', 'crates/koharu-runtime/src/network.rs': '58B6ADABC6F4E9A68BBD8BAEBFB7E5B8991F1ECCD34674EE5FCEC047F53F98F4', 'crates/koharu-runtime/src/source/hugging_face.rs': 'E555B045D112126EE8BD54C18C060BEA27B705A8FCE7E6A8626F385F2A59DE97', 'crates/koharu-runtime/src/runtime/packages/cuda.rs': 'D04015112E9AF34D7AAB359B79C6EC21A7CED540F431C06D52663D7E73EEA563', 'crates/koharu-runtime/src/runtime/packages/torch.rs': '2080392B0FE6F9184D97FBD702CB4DFF341B3DED174C9ECF544311D60B699CB7', 'crates/koharu-runtime/src/runtime/packages/llama.rs': 'EC977DC2108FC82874894485CBA5BECCD79AD9A10E09DCE54E3E414C4CBEBE9F', 'crates/koharu-runtime/src/runtime/packages/diffusion.rs': '66CCF73511C60BE8CCD49C73061C25810A52BF8733F3967FB6FA7BB93B3EF635'}
+          for name, expected in PRIVACY_EXPECTED.items():
+              actual = hashlib.sha256(Path(name).read_bytes().replace(b"\r\n", b"\n")).hexdigest().upper()
+              if actual != expected:
+                  raise SystemExit(f"FATAL: unexpected privacy patch input: {name}: {actual}")
+
+          # Privacy candidate: local resource policy, independent from translation tuning.
+
+          path = Path('crates/koharu-runtime/src/store.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, 'static ROOT: OnceLock<PathBuf> = OnceLock::new();', 'static ROOT: OnceLock<PathBuf> = OnceLock::new();\n// Set only after an exact, local, SHA-256 verified store inventory succeeds.\nstatic LOCAL_FILES: OnceLock<std::collections::HashMap<PathBuf, u64>> = OnceLock::new();\n\nfn plain_metadata(path: &Path) -> Result<std::fs::Metadata> {\n    let metadata = std::fs::symlink_metadata(path)\n        .with_context(|| format!("cannot inspect local resource {}", path.display()))?;\n    ensure!(!metadata.file_type().is_symlink(), "symbolic link in local store: {}", path.display());\n    #[cfg(windows)]\n    {\n        use std::os::windows::fs::MetadataExt;\n        ensure!(metadata.file_attributes() & 0x400 == 0,\n            "reparse point in local store: {}", path.display());\n    }\n    Ok(metadata)\n}\n\nfn privacy_relative(path: &Path) -> bool {\n    !path.as_os_str().is_empty() && path.components().all(|part| {\n        match part {\n            std::path::Component::Normal(name) => name.to_str().is_some_and(|name|\n                !name.is_empty() && !name.contains([\':\', \'\\\\\', \'/\']) &&\n                !name.ends_with([\'.\', \' \']) && !name.chars().any(char::is_control)),\n            _ => false,\n        }\n    })\n}\n\nasync fn verify_local_tree(root: &Path, entries: Vec<(PathBuf, u64, String)>)\n    -> Result<std::collections::HashMap<PathBuf, u64>>\n{\n    ensure!(root.is_absolute() && !entries.is_empty(), "absolute store and nonempty manifest required");\n    #[cfg(windows)]\n    ensure!(matches!(root.components().next(), Some(std::path::Component::Prefix(p))\n        if matches!(p.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_))),\n        "privacy store must use a local drive path");\n    for ancestor in root.ancestors() {\n        ensure!(plain_metadata(ancestor)?.is_dir(), "invalid store ancestor: {}", ancestor.display());\n    }\n    let mut expected = std::collections::HashMap::new();\n    for (relative, size, hash) in entries {\n        ensure!(privacy_relative(&relative), "invalid manifest resource path: {}", relative.display());\n        ensure!(hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()), "invalid manifest SHA-256");\n        ensure!(expected.insert(relative, (size, hash)).is_none(), "duplicate manifest path");\n    }\n    // Walk without following links; reject junctions and unexpected files as encountered.\n    let mut verified = std::collections::HashMap::new();\n    let mut pending = vec![root.to_path_buf()];\n    while let Some(directory) = pending.pop() {\n        for entry in std::fs::read_dir(&directory)? {\n            let path = entry?.path();\n            let metadata = plain_metadata(&path)?;\n            if metadata.is_dir() {\n                pending.push(path);\n            } else {\n                ensure!(metadata.is_file(), "unsupported local resource: {}", path.display());\n                let relative = path.strip_prefix(root)?;\n                let (size, hash) = expected.remove(relative)\n                    .with_context(|| format!("unlisted local resource {}", relative.display()))?;\n                verify_artifact(&path, &FileExpectation { size: Some(size), sha256: Some(hash.to_ascii_lowercase()) }).await\n                    .with_context(|| format!("local resource integrity failure: {}", relative.display()))?;\n                verified.insert(relative.to_path_buf(), size);\n            }\n        }\n    }\n    ensure!(expected.is_empty(), "missing local resources: {:?}", expected.keys().collect::<Vec<_>>());\n    Ok(verified)\n}', 'local tree verifier')
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          path = Path('crates/koharu-runtime/src/store.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, 'impl Store {', 'impl Store {\n    /// Activates the immutable, local-only policy before runtime initialization.\n    pub async fn enable_local_only(entries: Vec<(PathBuf, u64, String)>) -> Result<()> {\n        ensure!(ROOT.get().is_some(), "configure store before enabling local-only mode");\n        ensure!(LOCAL_FILES.get().is_none(), "local-only policy already configured");\n        let files = verify_local_tree(Self::root(), entries).await?;\n        let count = files.len();\n        LOCAL_FILES.set(files).map_err(|_| anyhow::anyhow!("local-only policy already configured"))?;\n        tracing::info!(files = count, "privacy local store SHA-256 verification complete");\n        Ok(())\n    }\n\n    #[must_use]\n    pub fn local_only() -> bool {\n        LOCAL_FILES.get().is_some()\n    }\n\n    pub(crate) fn local_file(path: PathBuf) -> Result<PathBuf> {\n        let files = LOCAL_FILES.get().context("local-only policy not initialized")?;\n        let relative = path.strip_prefix(Self::root())?;\n        let size = files.get(relative).context("resource absent from verified local manifest")?;\n        for ancestor in path.ancestors() {\n            plain_metadata(ancestor)?;\n        }\n        let metadata = plain_metadata(&path)?;\n        ensure!(metadata.is_file() && metadata.len() == *size,\n            "verified local resource is missing or changed: {}", path.display());\n        Ok(path)\n    }\n\n    pub(crate) fn local_directory(target: PathBuf, valid: impl FnOnce(&Path) -> bool) -> Result<PathBuf> {\n        let files = LOCAL_FILES.get().context("local-only policy not initialized")?;\n        let relative = target.strip_prefix(Self::root())?;\n        ensure!(files.keys().any(|path| path.starts_with(relative)),\n            "runtime absent from verified local manifest: {}", target.display());\n        for ancestor in target.ancestors() {\n            ensure!(plain_metadata(ancestor)?.is_dir(), "invalid local runtime directory");\n        }\n        ensure!(valid(&target), "incomplete local runtime: {}", target.display());\n        Ok(target)\n    }\n', 'local store policy API')
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          path = Path('crates/koharu-runtime/src/store.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        if valid(&target) {\n            return Ok(target);\n        }\n\n        let _guard = Lock::acquire(&target).await?;', '        if Self::local_only() {\n            return Self::local_directory(target, valid);\n        }\n        if valid(&target) {\n            return Ok(target);\n        }\n\n        let _guard = Lock::acquire(&target).await?;', 'forbid directory repairs')
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          path = Path('crates/koharu-runtime/src/store.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        if expected.satisfied_by_size(&target) {\n            return Ok(target);\n        }\n\n        let _guard = Lock::acquire(&target).await?;', '        if Self::local_only() {\n            return Self::local_file(target);\n        }\n        if expected.satisfied_by_size(&target) {\n            return Ok(target);\n        }\n\n        let _guard = Lock::acquire(&target).await?;', 'forbid file downloads and repairs')
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          path = Path('crates/koharu-runtime/src/store.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '    use super::*;\n', '    use super::*;\n\n    #[tokio::test]\n    async fn privacy_exact_tree_accepts_verified_bytes() {\n        let root = tempfile::tempdir().unwrap();\n        let dir = root.path().canonicalize().unwrap();\n        std::fs::write(dir.join("model.bin"), b"abc").unwrap();\n        let hash = sha256_hex(&dir.join("model.bin")).await.unwrap();\n        let files = verify_local_tree(&dir, vec![(PathBuf::from("model.bin"), 3, hash)]).await.unwrap();\n        assert_eq!(files.len(), 1);\n    }\n\n    #[tokio::test]\n    async fn privacy_rejects_changed_missing_and_extra_files() {\n        let root = tempfile::tempdir().unwrap();\n        let dir = root.path().canonicalize().unwrap();\n        let path = dir.join("model.bin");\n        std::fs::write(&path, b"abc").unwrap();\n        let hash = sha256_hex(&path).await.unwrap();\n        let manifest = vec![(PathBuf::from("model.bin"), 3, hash)];\n        std::fs::write(&path, b"abd").unwrap();\n        assert!(verify_local_tree(&dir, manifest.clone()).await.is_err());\n        std::fs::remove_file(&path).unwrap();\n        assert!(verify_local_tree(&dir, manifest.clone()).await.is_err());\n        std::fs::write(&path, b"abc").unwrap();\n        std::fs::write(dir.join("extra.bin"), b"x").unwrap();\n        assert!(verify_local_tree(&dir, manifest).await.is_err());\n    }\n\n    #[tokio::test]\n    async fn privacy_policy_blocks_http_and_store_repairs() {\n        // Store policy is process-wide; isolate this test from other store tests.\n        const CHILD: &str = "KOHARU_PRIVACY_UNIT_TEST_CHILD";\n        if std::env::var_os(CHILD).is_none() {\n            let output = std::process::Command::new(std::env::current_exe().unwrap())\n                .args(["--exact", "store::tests::privacy_policy_blocks_http_and_store_repairs", "--nocapture"])\n                .env(CHILD, "1")\n                .output().unwrap();\n            assert!(output.status.success(), "child failed: {}", String::from_utf8_lossy(&output.stderr));\n            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "isolated test did not run");\n            return;\n        }\n        let root = tempfile::tempdir().unwrap();\n        let dir = root.path().canonicalize().unwrap();\n        let relative = PathBuf::from("runtime/ready.bin");\n        std::fs::create_dir(dir.join("runtime")).unwrap();\n        std::fs::write(dir.join(&relative), b"abc").unwrap();\n        let hash = sha256_hex(&dir.join(&relative)).await.unwrap();\n        Store::configure(dir.clone()).unwrap();\n        Store::enable_local_only(vec![(relative.clone(), 3, hash)]).await.unwrap();\n        assert!(crate::network::http().is_err());\n        assert_eq!(Store::local_file(dir.join(&relative)).unwrap(), dir.join(&relative));\n        let missing = dir.join("missing.bin");\n        let result = Store::file(missing.clone(), FileExpectation::default(), |_| async {\n            panic!("privacy must never execute file installer");\n            #[allow(unreachable_code)]\n            Ok(())\n        }).await;\n        assert!(result.is_err());\n        assert!(!missing.exists());\n        let incomplete = dir.join("runtime");\n        let result = Store::directory(incomplete.clone(), FileExpectation::default(), |_| false,\n            |_, _| async {\n                panic!("privacy must never execute directory installer");\n                #[allow(unreachable_code)]\n                Ok(())\n            }).await;\n        assert!(result.is_err());\n        assert_eq!(std::fs::read(dir.join(&relative)).unwrap().as_slice(), b"abc");\n    }\n\n    #[test]\n    fn privacy_rejects_unsafe_manifest_paths() {\n        assert!(privacy_relative(Path::new("model.bin")));\n        assert!(!privacy_relative(Path::new("../model.bin")));\n        assert!(!privacy_relative(Path::new("model.bin:stream")));\n        assert!(!privacy_relative(Path::new("")));\n    }\n', 'integrity unit tests')
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          path = Path('crates/koharu-runtime/src/network.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, 'pub(crate) fn http() -> Result<Client> {', 'pub(crate) fn http() -> Result<Client> {\n    anyhow::ensure!(!crate::Store::local_only(), "network access forbidden in privacy translation mode");', 'shared HTTP client guard')
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          path = Path('crates/koharu-runtime/src/source/hugging_face.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        let expected = self.expectation().await;', '        if Store::local_only() {\n            return Store::local_file(self.path());\n        }\n        let expected = self.expectation().await;', 'local HF models and fonts')
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          path = Path('crates/koharu-runtime/src/runtime/packages/cuda.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        let resolved = wheel(project, Platform::host()?).await?;', '        if Store::local_only() {\n            return Store::local_directory(target, |path| self.library_paths(path).is_ok());\n        }\n        let resolved = wheel(project, Platform::host()?).await?;', 'cuda local-first before metadata')
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          path = Path('crates/koharu-runtime/src/runtime/packages/torch.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        let asset = self.asset()?;', '        if Store::local_only() {\n            return Store::local_directory(path, |path| self.complete(path));\n        }\n        let asset = self.asset()?;', 'torch local-first before metadata')
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          path = Path('crates/koharu-runtime/src/runtime/packages/llama.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        let asset = self.asset();', '        if Store::local_only() {\n            return Store::local_directory(target, |path| self.complete(path));\n        }\n        let asset = self.asset();', 'llama local-first before metadata')
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          path = Path('crates/koharu-runtime/src/runtime/packages/diffusion.rs')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(text, '        let asset = self.asset();', '        if Store::local_only() {\n            return Store::local_directory(target, |path| self.complete(path));\n        }\n        let asset = self.asset();', 'diffusion local-first before metadata')
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+
+          p = Path('crates/koharu-ml/src/bin/paddle_ocr_vl_quantized.rs')
+          assert hashlib.sha256(p.read_bytes().replace(b"\r\n", b"\n")).hexdigest().upper() == '3D378841D9417198338E0E9A97467378B9546AACD1123A53E60613B695F2C35B'
+          p.write_text('//! Lab 187: direct OCR only, using the pinned Paddle GGUF implementation.\nuse std::{collections::BTreeSet, fs, io::Cursor, path::{Path, PathBuf}, time::Instant};\nuse anyhow::{Context, Result, ensure};\nuse clap::Parser;\nuse koharu_ml::{paddle_ocr_vl::PaddleOCRVLTask, paddle_ocr_vl_quantized::PaddleOCRVLQuantized};\nuse koharu_runtime::{Backend, Store};\nuse serde_json::{Value, json};\n\n#[derive(Debug, Parser)]\n#[command(about = "LAB187: local-only PaddleOCR-VL-1.6 GGUF crop replay")]\nstruct Cli {\n    #[arg(long)]\n    input_manifest: PathBuf,\n    #[arg(long)]\n    output: PathBuf,\n}\n\nfn plain(path: &Path) -> Result<fs::Metadata> {\n    ensure!(path.is_absolute(), "LAB187: absolute path required");\n    #[cfg(windows)]\n    ensure!(matches!(path.components().next(), Some(std::path::Component::Prefix(p)) if matches!(p.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_))), "LAB187: local drive required");\n    for part in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {\n        let m = fs::symlink_metadata(part)?;\n        ensure!(!m.file_type().is_symlink(), "LAB187: symbolic link refused");\n        #[cfg(windows)] {\n            use std::os::windows::fs::MetadataExt;\n            ensure!(m.file_attributes() & 0x400 == 0, "LAB187: reparse point refused");\n        }\n    }\n    Ok(fs::symlink_metadata(path)?)\n}\n\nfn local_json(path: &Path) -> Result<Value> {\n    let meta = plain(path)?;\n    ensure!(meta.is_file() && meta.len() <= 4_000_000, "LAB187: invalid manifest");\n    let raw = fs::read_to_string(path)?;\n    Ok(serde_json::from_str(raw.trim_start_matches(\'\\u{feff}\'))?)\n}\n\nfn crop_name(name: &str) -> bool {\n    name.ends_with(".png") && name.len() <= 100 && !name.starts_with(\'.\') &&\n        name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b\'-\' | b\'_\' | b\'.\'))\n}\n\nfn hash_ok(sha: &str) -> bool { sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()) }\n\nfn normalized(text: &str) -> String {\n    let visible: Vec<_> = text.chars().filter(|c| !c.is_whitespace()).collect();\n    if visible.len() >= 2 && visible.iter().all(|c| matches!(c, \'☐\' | \'□\' | \'▢\' | \'▣\' | \'�\')) {\n        "…".to_owned()\n    } else { text.to_owned() }\n}\n\nfn repetition(text: &str) -> Option<(usize, usize)> {\n    let (mut total, mut longest, mut run) = (0usize, 0usize, 0usize);\n    let mut previous = None;\n    for ch in text.chars().filter(|ch| !ch.is_whitespace()) {\n        total += 1;\n        if ch.is_alphabetic() {\n            run = if previous == Some(ch) { run + 1 } else { 1 };\n            longest = longest.max(run);\n            previous = Some(ch);\n        } else { run = 0; previous = None; }\n    }\n    (total >= 128 && longest >= 128 && longest as u128 * 10 >= total as u128 * 9).then_some((total, longest))\n}\n\n#[tokio::main]\nasync fn main() -> Result<()> {\n    let cli = Cli::parse();\n    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::builder()\n        .with_default_directive(tracing::Level::INFO.into()).from_env_lossy())\n        .with_writer(std::io::stderr).init();\n    let exe = std::env::current_exe()?;\n    let bin = exe.parent().context("LAB187: missing bin")?;\n    let lab = bin.parent().context("LAB187: missing lab")?;\n    ensure!(bin.file_name().and_then(|s| s.to_str()) == Some("bin") && lab.file_name().and_then(|s| s.to_str()) == Some("Paddle_Replay_187"), "LAB187: wrong executable layout");\n    ensure!(plain(&exe)?.is_file() && plain(lab)?.is_dir(), "LAB187: invalid lab");\n    let store = lab.join("store");\n    let jobs = lab.join("jobs");\n    let inputs = lab.join("inputs");\n    ensure!(plain(&store)?.is_dir() && plain(&jobs)?.is_dir() && plain(&inputs)?.is_dir(), "LAB187: invalid folders");\n    let supplied_store = PathBuf::from(std::env::var_os("KOHARU_STORE").context("LAB187: KOHARU_STORE required")?);\n    ensure!(plain(&supplied_store)?.is_dir() && supplied_store.canonicalize()? == store.canonicalize()?, "LAB187: wrong store");\n    let output = &cli.output;\n    let folder = cli.input_manifest.parent().context("LAB187: no input folder")?;\n    ensure!(plain(folder)?.is_dir() && folder.parent().context("LAB187: no input root")?.canonicalize()? == inputs.canonicalize()?, "LAB187: input must be in a direct child of inputs");\n    ensure!(cli.input_manifest.file_name().and_then(|s| s.to_str()) == Some("crops-manifest.json"), "LAB187: invalid input manifest name");\n    ensure!(output.is_absolute() && plain(output.parent().context("LAB187: no output parent")?)?.is_dir() && output.parent().context("LAB187: no output parent")?.canonicalize()? == jobs.canonicalize()?, "LAB187: output must be direct child of jobs");\n    ensure!(output.file_name().is_some() && matches!(fs::symlink_metadata(output), Err(ref e) if e.kind() == std::io::ErrorKind::NotFound), "LAB187: output already exists or not accessible");\n    let manifest = local_json(&lab.join("store-manifest.json"))?;\n    ensure!(manifest["schema"] == "koharu-migration-v1", "LAB187: wrong store schema");\n    let entries = manifest["manifest"].as_array().context("LAB187: missing store rows")?.iter().map(|r| {\n        ensure!(r["verified"] == true, "LAB187: unverified resource");\n        let path = r["relative_path"].as_str().context("LAB187: no resource path")?;\n        let size = r["size_bytes"].as_u64().context("LAB187: no resource size")?;\n        let sha = r["sha256"].as_str().context("LAB187: no resource hash")?;\n        ensure!(hash_ok(sha), "LAB187: bad resource hash");\n        Ok((PathBuf::from(path), size, sha.to_owned()))\n    }).collect::<Result<Vec<_>>>()?;\n    Store::configure(store)?;\n    Store::enable_local_only(entries).await?;\n    let manifest = local_json(&cli.input_manifest)?;\n    ensure!(manifest["schema"] == "koharu-crop-replay-v1", "LAB187: wrong crop schema");\n    let rows = manifest["files"].as_array().context("LAB187: missing crop rows")?;\n    ensure!(!rows.is_empty() && rows.len() <= 256, "LAB187: require 1..256 crops");\n    let mut seen = BTreeSet::new();\n    let mut crops = Vec::new();\n    let mut total_bytes = 0u64;\n    for row in rows {\n        let name = row["name"].as_str().context("LAB187: missing name")?;\n        let size = row["size_bytes"].as_u64().context("LAB187: missing size")?;\n        let sha = row["sha256"].as_str().context("LAB187: missing hash")?;\n        ensure!(crop_name(name) && seen.insert(name.to_ascii_lowercase()) && size > 0 && size <= 20_000_000 && hash_ok(sha), "LAB187: invalid crop identity");\n        total_bytes += size;\n        ensure!(total_bytes <= 512_000_000, "LAB187: input byte budget exceeded");\n        let path = folder.join(name);\n        let meta = plain(&path)?;\n        ensure!(meta.is_file() && meta.len() == size, "LAB187: crop size mismatch");\n        let bytes = fs::read(&path)?;\n        ensure!(bytes.len() as u64 == size && Store::lab_sha256_bytes(&bytes).eq_ignore_ascii_case(sha), "LAB187: crop SHA256 mismatch");\n        let reader = image::ImageReader::with_format(Cursor::new(&bytes), image::ImageFormat::Png);\n        let (w,h) = reader.into_dimensions()?;\n        ensure!(w > 0 && h > 0 && u64::from(w)*u64::from(h) <= 16_000_000, "LAB187: crop dimensions invalid");\n        crops.push((name.to_owned(), sha.to_owned(), bytes));\n    }\n    fs::create_dir(output)?;\n    let started = Instant::now();\n    // Same runtime and model load path as the original Paddle GGUF utility.\n    koharu_ml::init().await?;\n    let device = koharu_ml::device(false);\n    ensure!(device.backend == Backend::Cuda, "LAB187: CUDA required");\n    let description = device.description.clone();\n    let model = PaddleOCRVLQuantized::load(device).await?;\n    let load_seconds = started.elapsed().as_secs_f64();\n    let mut results = Vec::new();\n    for (name, sha, bytes) in crops {\n        let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)?;\n        let timer = Instant::now();\n        let text = model.inference(&image, PaddleOCRVLTask::Ocr)?.text;\n        let seconds = timer.elapsed().as_secs_f64();\n        let normal = normalized(&text);\n        let guard = repetition(&normal);\n        let effective = if guard.is_some() { "" } else { normal.as_str() };\n        results.push(json!({"name":name,"sha256":sha,"width":image.width(),"height":image.height(),"text":text,"normalized_text":&normal,"effective_text":effective,"repetition_guard":guard,"seconds":seconds}));\n    }\n    ensure!(results.len() == rows.len(), "LAB187: incomplete replay");\n    fs::write(output.join("ocr-replay.json"), serde_json::to_vec_pretty(&json!({\n        "schema":"koharu-paddle-crop-replay-v1","source_commit":"30db248cb365e630a94f44bf7e02e87bd5dc8c6b",\n        "model_revision":"511b09642bb324401f15f97cc23bc67e8f0a291d","device":description,"batch_size":1,\n        "load_seconds":load_seconds,"elapsed_seconds":started.elapsed().as_secs_f64(),"results":results\n    }))?)?;\n    Ok(())\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test] fn guard_and_normalization() {\n        assert_eq!(normalized("☐ ☐"), "…");\n        assert!(repetition(&"A".repeat(128)).is_some());\n        assert!(repetition(&"A".repeat(127)).is_none());\n        assert!(repetition("HELLO THERE!").is_none());\n        assert!(crop_name("crop-001.png"));\n        assert!(!crop_name("../x.png"));\n    }\n}\n', encoding="utf-8", newline="\n")
+          p = Path('crates/koharu-runtime/src/store.rs')
+          s = p.read_text(encoding='utf-8')
+          s = replace_once(s, 'impl Store {', 'impl Store {\n    /// Hash the exact PNG bytes used for local laboratory inference.\n    pub fn lab_sha256_bytes(bytes: &[u8]) -> String {\n        use sha2::{Digest, Sha256};\n        hex::encode(Sha256::digest(bytes))\n    }\n', 'lab byte hash')
+          p.write_text(s, encoding='utf-8', newline='\n')
+
+          AFTER = {'crates/koharu-runtime/src/store.rs': '37D975F575615EA6D93A1C48DBDEECD5CED8672B10346AD469D95B5D287FEE35', 'crates/koharu-runtime/src/network.rs': '540626EB59A7C1F07D496C328A552E37D4F8BFB8B0AC368151816ACB0C52FF3B', 'crates/koharu-runtime/src/source/hugging_face.rs': '53F5B451108CAAD7745F0E0326EAAB0A33CC55E601C182FF853ACC00F29DD7D1', 'crates/koharu-runtime/src/runtime/packages/cuda.rs': 'DC7729110B881C57807E12DD522326FA61370B4C30B4EC2EB7CBBDCDA0B919CB', 'crates/koharu-runtime/src/runtime/packages/torch.rs': 'F5BD916803921053E9EB05AB1BB9C91CEDA3554F120E694201849989530A44F7', 'crates/koharu-runtime/src/runtime/packages/llama.rs': 'F47CEF0C94CB71F72AABD6C32957A1330B48CD05545EC3291EEB0DEA708AD2E4', 'crates/koharu-runtime/src/runtime/packages/diffusion.rs': '14962B8B361779C6CD7FAD065F853200BB7661DEC5F24C9AFBF4BC9D65278494', 'crates/koharu-ml/src/bin/paddle_ocr_vl_quantized.rs': 'A3C1D30EF16D423E2839E8D5F2D8AAB1A862BA6903D57C5A2306F8B1C5FCEE52'}
+          for name, expected in AFTER.items():
+              assert hashlib.sha256(Path(name).read_bytes()).hexdigest().upper() == expected, name
+          print("LAB187 source hashes verified")
+          '@
+          $file = Join-Path $env:RUNNER_TEMP 'apply_lab187.py'
+          [IO.File]::WriteAllText($file, $patch, [Text.UTF8Encoding]::new($false))
+          python $file
+          if ($LASTEXITCODE -ne 0) { throw 'Patch failed' }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid diff' }
+          $changes = @(git diff --name-only)
+          $expected = @(
+              'crates/koharu-runtime/src/store.rs',
+              'crates/koharu-runtime/src/network.rs',
+              'crates/koharu-runtime/src/source/hugging_face.rs',
+              'crates/koharu-runtime/src/runtime/packages/cuda.rs',
+              'crates/koharu-runtime/src/runtime/packages/torch.rs',
+              'crates/koharu-runtime/src/runtime/packages/llama.rs',
+              'crates/koharu-runtime/src/runtime/packages/diffusion.rs',
+              'crates/koharu-ml/src/bin/paddle_ocr_vl_quantized.rs'
+          )
+          if ($changes.Count -ne $expected.Count -or @($changes | Where-Object { $_ -notin $expected }).Count -ne 0) { throw 'Unexpected source files' }
+      - name: Test offline runtime policy
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cargo test --release --locked -p koharu-runtime --lib privacy_
+      - name: Test dedicated OCR helper
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cargo test --release --locked -p koharu-ml --bin paddle_ocr_vl_quantized
+      - name: Compile OCR only
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cargo build --release --locked -p koharu-ml --bin paddle_ocr_vl_quantized
+      - name: Verify CLI and package binary identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = 'target/release/paddle_ocr_vl_quantized.exe'
+          if (!(Test-Path -LiteralPath $src -PathType Leaf)) { throw 'Missing OCR executable' }
+          $out = 'target/release/lab187-artifact'
+          New-Item -ItemType Directory -Path $out -ErrorAction Stop | Out-Null
+          $exe = Join-Path $out 'koharu-batch.exe'
+          Copy-Item -LiteralPath $src -Destination $exe
+          & $exe --help
+          if ($LASTEXITCODE -ne 0) { throw 'Help failed' }
+          $PSNativeCommandUseErrorActionPreference = $false
+          $guard = & $exe 2>&1
+          if ($LASTEXITCODE -eq 0 -or ($guard -join ' ') -notmatch 'input-manifest') { throw 'Required argument guard failed' }
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          Write-Host "KOHARU_LAB_187_SHA256=$hash"
+          "$hash  koharu-batch.exe" | Set-Content (Join-Path $out 'koharu-lab-187-sha256.txt') -Encoding ascii
+          @('source=30db248cb365e630a94f44bf7e02e87bd5dc8c6b', "workflow_run=$env:GITHUB_RUN_ID", (rustc --version), (cargo --version)) | Set-Content (Join-Path $out 'koharu-lab-187-build.txt') -Encoding utf8
+      - name: Upload only executable and provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: koharu-batch-0.89.0-paddle-crop-replay-lab-187
+          path: target/release/lab187-artifact/
+          if-no-files-found: error
+          retention-days: 7
